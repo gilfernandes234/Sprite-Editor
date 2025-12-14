@@ -6,9 +6,13 @@
 - Slicer Png
 - Export
 
+
+
 ```bash
 # Instalar dependências
-pip install -r requirements.txt
+- Python 3.9+
+
+py -m pip install -r requirements.txt
 
 # Executar 
 python slicerObd.py
