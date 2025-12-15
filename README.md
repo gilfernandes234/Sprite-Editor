@@ -5,6 +5,8 @@
 - Color Remove
 - Slicer Png
 - Eraser
+- Rotate
+- Flip
 - Export
 
 
