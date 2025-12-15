@@ -15,6 +15,19 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QSize, QPoint, QPointF
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QIcon, QBrush, QWheelEvent, QKeyEvent
 
+
+# POR ISTO:
+try:
+    import torch
+    from realesrgan import RealESRGANer
+    from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    REALESRGAN_AVAILABLE = True
+except ImportError:
+    REALESRGAN_AVAILABLE = False
+    print("⚠️ Real-ESRGAN não está instalado.")
+
+
 class GridOverlay(QGraphicsObject):
 
     positionChanged = pyqtSignal(int, int) 
@@ -75,24 +88,52 @@ class GridOverlay(QGraphicsObject):
 
 
 class SelectionRectangle(QGraphicsRectItem):
-
     
     def __init__(self):
         super().__init__()
-        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)  # Desabilitado por padrão
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setZValue(15)
         
-
         pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
         pen.setCosmetic(True)
         self.setPen(pen)
-
         self.setBrush(QBrush(QColor(0, 150, 255, 30)))
+        
+        self.setAcceptHoverEvents(True)
+        
+        # Armazena a imagem selecionada como um pixmap item
+        self.selected_pixmap_item = None
+        self.original_rect = None
         
     def set_rect(self, rect):
         """Define o retângulo de seleção"""
         self.setRect(rect)
+        self.original_rect = rect
+    
+    def hoverEnterEvent(self, event):
+        """Muda o cursor quando passa sobre a seleção"""
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverEnterEvent(event)
+    
+    def hoverLeaveEvent(self, event):
+        """Restaura o cursor ao sair da seleção"""
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().hoverLeaveEvent(event)
+    
+    def mousePressEvent(self, event):
+        """Permite clicar em qualquer parte do retângulo para arrastar"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """Restaura o cursor após arrastar"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().mouseReleaseEvent(event)
+
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -146,7 +187,7 @@ class SliceWindow(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Slicer Obd")
+        self.setWindowTitle("Sprite Editor - Made by Sherrat")
         self.resize(900, 600)
         self.setStyleSheet("background-color: #494949; color: white;")
         self.original_image_pil = None       
@@ -157,9 +198,12 @@ class SliceWindow(QWidget):
         self.paint_color_picker_mode = False  
         
 
+        # Eraser tool
         self.eraser_mode = False
         self.eraser_size = 10
+        self.eraser_feathering = 0  # NOVA VARIÁVEL
         self.last_eraser_point = None
+
         
 
         self.paint_mode = False
@@ -168,6 +212,7 @@ class SliceWindow(QWidget):
         self.last_paint_point = None
         self.paint_feathering = 0  
         
+        self.outline_color = QColor(0, 0, 0, 255)  # Preto por padrão       
 
         self.selection_mode = False
         self.selection_start = None
@@ -175,6 +220,11 @@ class SliceWindow(QWidget):
         self.is_drawing_selection = False
         self.selected_image_data = None
         
+        self.is_moving_selection = False
+        self.move_start_pos = None
+        self.selection_image_backup = None  # Backup da área original
+        self.floating_selection_pixmap = None         
+                
      
         self.undo_stack = []
         self.redo_stack = []
@@ -223,7 +273,7 @@ class SliceWindow(QWidget):
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #222; background: #444; }
-            QTabBar::tab { background: #333; color: #ddd; padding: 4px; min-width: 80px; }
+            QTabBar::tab { background: #333; color: #ddd; padding: 4px; min-width: 58px; }
             QTabBar::tab:selected { background: #555; color: white; }
         """)
 
@@ -269,14 +319,98 @@ class SliceWindow(QWidget):
         self.btn_reset_image.setEnabled(False)
         resize_layout.addWidget(self.btn_reset_image, 5, 0, 1, 2)
 
+        # Na função init_ui, dentro da tab_resize, após grp_resize:
+
         grp_resize.setLayout(resize_layout)
         tab_resize_layout.addWidget(grp_resize)
+
+        # NOVO GRUPO - Edge Detection & Outline
+        grp_edges = QGroupBox("Edge Detection & Outline")
+        edges_layout = QGridLayout()
+
+        # Detector de Bordas
+        edges_layout.addWidget(QLabel("Edge Detection:"), 0, 0, 1, 2)
+
+        self.btn_detect_edges = QPushButton("Detect Edges")
+        self.btn_detect_edges.setStyleSheet("background-color: #6c757d; font-weight: bold;")
+        self.btn_detect_edges.clicked.connect(self.detect_edges)
+        self.btn_detect_edges.setEnabled(False)
+        edges_layout.addWidget(self.btn_detect_edges, 1, 0, 1, 2)
+
+        # Outline Tool
+        edges_layout.addWidget(QLabel("Outline:"), 2, 0, 1, 2)
+
+        edges_layout.addWidget(QLabel("Color:"), 3, 0)
+        self.btn_outline_color = QPushButton("Choose")
+        self.btn_outline_color.setStyleSheet("background-color: #555;")
+        self.btn_outline_color.clicked.connect(self.choose_outline_color)
+        self.btn_outline_color.setEnabled(False)
+        edges_layout.addWidget(self.btn_outline_color, 3, 1)
+
+        self.lbl_outline_color_preview = QLabel()
+        self.lbl_outline_color_preview.setFixedHeight(25)
+        self.lbl_outline_color_preview.setStyleSheet("background-color: #000000; border: 1px solid #222;")
+        edges_layout.addWidget(self.lbl_outline_color_preview, 4, 0, 1, 2)
+
+        edges_layout.addWidget(QLabel("Thickness:"), 5, 0)
+        self.spin_outline_thickness = QSpinBox()
+        self.spin_outline_thickness.setRange(1, 20)
+        self.spin_outline_thickness.setValue(2)
+        self.spin_outline_thickness.setSuffix("px")
+        edges_layout.addWidget(self.spin_outline_thickness, 5, 1)
+
+        edges_layout.addWidget(QLabel("Feathering:"), 6, 0)
+        self.spin_outline_feathering = QSpinBox()
+        self.spin_outline_feathering.setRange(0, 100)
+        self.spin_outline_feathering.setValue(0)
+        self.spin_outline_feathering.setSuffix("%")
+        self.spin_outline_feathering.setToolTip("0% = bordas duras, 100% = máxima suavização")
+        edges_layout.addWidget(self.spin_outline_feathering, 6, 1)
+
+        self.btn_apply_outline = QPushButton("Apply Outline")
+        self.btn_apply_outline.setStyleSheet("background-color: #17a2b8; font-weight: bold;")
+        self.btn_apply_outline.clicked.connect(self.apply_outline)
+        self.btn_apply_outline.setEnabled(False)
+        edges_layout.addWidget(self.btn_apply_outline, 7, 0, 1, 2)
+
+        # Edge Eraser
+        edges_layout.addWidget(QLabel("Edge Eraser:"), 8, 0, 1, 2)
+
+        edges_layout.addWidget(QLabel("Distance:"), 9, 0)
+        self.spin_edge_eraser_distance = QSpinBox()
+        self.spin_edge_eraser_distance.setRange(1, 50)
+        self.spin_edge_eraser_distance.setValue(5)
+        self.spin_edge_eraser_distance.setSuffix("px")
+        self.spin_edge_eraser_distance.setToolTip("Distância das bordas para apagar")
+        edges_layout.addWidget(self.spin_edge_eraser_distance, 9, 1)
+
+        edges_layout.addWidget(QLabel("Feathering:"), 10, 0)
+        self.spin_edge_eraser_feathering = QSpinBox()
+        self.spin_edge_eraser_feathering.setRange(0, 100)
+        self.spin_edge_eraser_feathering.setValue(0)
+        self.spin_edge_eraser_feathering.setSuffix("%")
+        edges_layout.addWidget(self.spin_edge_eraser_feathering, 10, 1)
+
+        self.btn_erase_edges = QPushButton("Erase Edges")
+        self.btn_erase_edges.setStyleSheet("background-color: #dc3545; font-weight: bold;")
+        self.btn_erase_edges.clicked.connect(self.erase_edges)
+        self.btn_erase_edges.setEnabled(False)
+        edges_layout.addWidget(self.btn_erase_edges, 11, 0, 1, 2)
+
+        grp_edges.setLayout(edges_layout)
+        tab_resize_layout.addWidget(grp_edges)
+
         tab_resize_layout.addStretch()
+                
         
         
+        
+        # Na função init_ui, substitua a seção tab_transparency por:
+
         tab_transparency = QWidget()
         tab_transparency_layout = QVBoxLayout(tab_transparency)
 
+        # GRUPO 1: Remove Color (já existente)
         grp_transparency = QGroupBox("Remove Color")
         transparency_layout = QGridLayout()
 
@@ -284,7 +418,7 @@ class SliceWindow(QWidget):
         self.line_hex_color = QLineEdit()
         self.line_hex_color.setPlaceholderText("#dcff73")
         self.line_hex_color.setMaxLength(7)
-        self.line_hex_color.textChanged.connect(self.update_color_preview) 
+        self.line_hex_color.textChanged.connect(self.update_color_preview)
         transparency_layout.addWidget(self.line_hex_color, 0, 1)
 
         transparency_layout.addWidget(QLabel("Tolerance:"), 1, 0)
@@ -313,7 +447,109 @@ class SliceWindow(QWidget):
 
         grp_transparency.setLayout(transparency_layout)
         tab_transparency_layout.addWidget(grp_transparency)
+
+        # GRUPO 2: Color Adjustments (NOVO)
+        grp_color_adjust = QGroupBox("Color Adjustments")
+        color_adjust_layout = QGridLayout()
+
+        # Brightness
+        color_adjust_layout.addWidget(QLabel("Brightness:"), 0, 0)
+        self.slider_brightness = QSlider(Qt.Orientation.Horizontal)
+        self.slider_brightness.setRange(-100, 100)
+        self.slider_brightness.setValue(0)
+        self.slider_brightness.valueChanged.connect(self.on_brightness_change)
+        color_adjust_layout.addWidget(self.slider_brightness, 0, 1)
+        self.lbl_brightness = QLabel("0")
+        self.lbl_brightness.setFixedWidth(40)
+        self.lbl_brightness.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_brightness, 0, 2)
+
+        # Contrast
+        color_adjust_layout.addWidget(QLabel("Contrast:"), 1, 0)
+        self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
+        self.slider_contrast.setRange(-100, 100)
+        self.slider_contrast.setValue(0)
+        self.slider_contrast.valueChanged.connect(self.on_contrast_change)
+        color_adjust_layout.addWidget(self.slider_contrast, 1, 1)
+        self.lbl_contrast = QLabel("0")
+        self.lbl_contrast.setFixedWidth(40)
+        self.lbl_contrast.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_contrast, 1, 2)
+
+        # Saturation
+        color_adjust_layout.addWidget(QLabel("Saturation:"), 2, 0)
+        self.slider_saturation = QSlider(Qt.Orientation.Horizontal)
+        self.slider_saturation.setRange(-100, 100)
+        self.slider_saturation.setValue(0)
+        self.slider_saturation.valueChanged.connect(self.on_saturation_change)
+        color_adjust_layout.addWidget(self.slider_saturation, 2, 1)
+        self.lbl_saturation = QLabel("0")
+        self.lbl_saturation.setFixedWidth(40)
+        self.lbl_saturation.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_saturation, 2, 2)
+
+        # Separador visual
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("background-color: #666;")
+        color_adjust_layout.addWidget(separator, 3, 0, 1, 3)
+
+        # Red
+        color_adjust_layout.addWidget(QLabel("Red:"), 4, 0)
+        self.slider_red = QSlider(Qt.Orientation.Horizontal)
+        self.slider_red.setRange(-100, 100)
+        self.slider_red.setValue(0)
+        self.slider_red.valueChanged.connect(self.on_red_change)
+        color_adjust_layout.addWidget(self.slider_red, 4, 1)
+        self.lbl_red = QLabel("0")
+        self.lbl_red.setFixedWidth(40)
+        self.lbl_red.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_red, 4, 2)
+
+        # Green
+        color_adjust_layout.addWidget(QLabel("Green:"), 5, 0)
+        self.slider_green = QSlider(Qt.Orientation.Horizontal)
+        self.slider_green.setRange(-100, 100)
+        self.slider_green.setValue(0)
+        self.slider_green.valueChanged.connect(self.on_green_change)
+        color_adjust_layout.addWidget(self.slider_green, 5, 1)
+        self.lbl_green = QLabel("0")
+        self.lbl_green.setFixedWidth(40)
+        self.lbl_green.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_green, 5, 2)
+
+        # Blue
+        color_adjust_layout.addWidget(QLabel("Blue:"), 6, 0)
+        self.slider_blue = QSlider(Qt.Orientation.Horizontal)
+        self.slider_blue.setRange(-100, 100)
+        self.slider_blue.setValue(0)
+        self.slider_blue.valueChanged.connect(self.on_blue_change)
+        color_adjust_layout.addWidget(self.slider_blue, 6, 1)
+        self.lbl_blue = QLabel("0")
+        self.lbl_blue.setFixedWidth(40)
+        self.lbl_blue.setAlignment(Qt.AlignmentFlag.AlignRight)
+        color_adjust_layout.addWidget(self.lbl_blue, 6, 2)
+
+        # Botão Apply
+        self.btn_apply_color = QPushButton("Apply")
+        self.btn_apply_color.setStyleSheet("background-color: #28a745; font-weight: bold; color: white;")
+        self.btn_apply_color.clicked.connect(self.apply_color_adjustments)
+        self.btn_apply_color.setEnabled(False)
+        color_adjust_layout.addWidget(self.btn_apply_color, 7, 0, 1, 3)
+
+        # Botão Reset
+        self.btn_reset_color = QPushButton("Reset")
+        self.btn_reset_color.clicked.connect(self.reset_color_sliders)
+        color_adjust_layout.addWidget(self.btn_reset_color, 8, 0, 1, 3)
+
+        grp_color_adjust.setLayout(color_adjust_layout)
+        tab_transparency_layout.addWidget(grp_color_adjust)
+
         tab_transparency_layout.addStretch()
+
+        
+        
+        
 
 
         tab_slice = QWidget()
@@ -367,23 +603,34 @@ class SliceWindow(QWidget):
         
         grp_eraser = QGroupBox("Eraser Tool")
         eraser_layout = QGridLayout()
-        
+
         eraser_layout.addWidget(QLabel("Brush Size:"), 0, 0)
         self.spin_eraser_size = QSpinBox()
         self.spin_eraser_size.setRange(1, 100)
         self.spin_eraser_size.setValue(10)
         self.spin_eraser_size.valueChanged.connect(self.on_eraser_size_change)
         eraser_layout.addWidget(self.spin_eraser_size, 0, 1)
-        
+
+        # ADICIONAR FEATHERING
+        eraser_layout.addWidget(QLabel("Feathering:"), 1, 0)
+        self.spin_eraser_feathering = QSpinBox()
+        self.spin_eraser_feathering.setRange(0, 100)
+        self.spin_eraser_feathering.setValue(0)
+        self.spin_eraser_feathering.setSuffix("%")
+        self.spin_eraser_feathering.setToolTip("0% = bordas duras, 100% = máxima suavização")
+        self.spin_eraser_feathering.valueChanged.connect(self.on_eraser_feathering_change)
+        eraser_layout.addWidget(self.spin_eraser_feathering, 1, 1)
+
         self.btn_toggle_eraser = QPushButton("Enable Eraser")
         self.btn_toggle_eraser.setCheckable(True)
         self.btn_toggle_eraser.setStyleSheet("background-color: #ff6b6b; font-weight: bold;")
         self.btn_toggle_eraser.clicked.connect(self.toggle_eraser_mode)
         self.btn_toggle_eraser.setEnabled(False)
-        eraser_layout.addWidget(self.btn_toggle_eraser, 1, 0, 1, 2)
-        
+        eraser_layout.addWidget(self.btn_toggle_eraser, 2, 0, 1, 2)  # Atualizar linha
+
         grp_eraser.setLayout(eraser_layout)
         tab_slice_layout.addWidget(grp_eraser)
+
         
    
         grp_paint = QGroupBox("Paint Brush")
@@ -432,7 +679,7 @@ class SliceWindow(QWidget):
         paint_layout.addWidget(self.btn_toggle_paint, 5, 0, 1, 2)
         
         grp_paint.setLayout(paint_layout)
-        tab_slice_layout.addWidget(grp_paint)
+        tab_transparency_layout.addWidget(grp_paint)
 
         grp_selection = QGroupBox("Selection Tool")
         selection_layout = QGridLayout()
@@ -471,11 +718,110 @@ class SliceWindow(QWidget):
         tab_slice_layout.addWidget(grp_selection)
 
         tab_slice_layout.addStretch()
+        
+        
+
+        tab_upscale = QWidget()
+        tab_upscale_layout = QVBoxLayout(tab_upscale)
+
+        # GRUPO 1: Denoise (que já discutimos)
+        grp_denoise = QGroupBox("Denoise (Noise Reduction)")
+        denoise_layout = QGridLayout()
+
+        denoise_layout.addWidget(QLabel("Method:"), 0, 0)
+        self.combo_denoise_method = QComboBox()
+        self.combo_denoise_method.addItems([
+            "Median Filter",
+            "Gaussian Blur", 
+            "Smooth Filter",
+            "Smooth More"
+        ])
+        denoise_layout.addWidget(self.combo_denoise_method, 0, 1)
+
+        denoise_layout.addWidget(QLabel("Strength:"), 1, 0)
+        self.spin_denoise_strength = QSpinBox()
+        self.spin_denoise_strength.setRange(1, 10)
+        self.spin_denoise_strength.setValue(3)
+        self.spin_denoise_strength.setToolTip("Kernel size para Median ou raio para Gaussian")
+        denoise_layout.addWidget(self.spin_denoise_strength, 1, 1)
+
+        self.btn_apply_denoise = QPushButton("Apply Denoise")
+        self.btn_apply_denoise.setStyleSheet("background-color: #17a2b8; font-weight: bold;")
+        self.btn_apply_denoise.clicked.connect(self.apply_denoise)
+        self.btn_apply_denoise.setEnabled(False)
+        denoise_layout.addWidget(self.btn_apply_denoise, 2, 0, 1, 2)
+
+        grp_denoise.setLayout(denoise_layout)
+        tab_upscale_layout.addWidget(grp_denoise)
+
+        grp_upscale = QGroupBox("AI Upscale (Real-ESRGAN)")
+        upscale_layout = QGridLayout()
+
+        upscale_layout.addWidget(QLabel("Model:"), 0, 0)
+        self.combo_upscale_model = QComboBox()
+        self.combo_upscale_model.addItems([
+            "RealESRGAN x4 (General)",
+            "RealESRGAN x4 Anime",
+            "RealESRGAN x2",
+        ])
+        self.combo_upscale_model.setCurrentIndex(1)
+        upscale_layout.addWidget(self.combo_upscale_model, 0, 1)
+
+        upscale_layout.addWidget(QLabel("Scale Factor:"), 1, 0)
+        self.combo_upscale_factor = QComboBox()
+        self.combo_upscale_factor.addItems(["2x", "3x", "4x"])
+        self.combo_upscale_factor.setCurrentIndex(2)
+        upscale_layout.addWidget(self.combo_upscale_factor, 1, 1)
+
+        # NOVA OPÇÃO: Manter resolução original
+        self.chk_keep_original_size = QCheckBox("Keep Original Resolution")
+        self.chk_keep_original_size.setChecked(False)
+        self.chk_keep_original_size.setToolTip(
+            "Faz upscale para melhorar qualidade, depois redimensiona\n"
+            "de volta para a resolução original (melhora detalhes)"
+        )
+        upscale_layout.addWidget(self.chk_keep_original_size, 2, 0, 1, 2)
+
+        # Opção de usar GPU
+        self.chk_use_gpu = QCheckBox("Use GPU (CUDA)")
+        self.chk_use_gpu.setChecked(False)
+        self.chk_use_gpu.setToolTip("Requer NVIDIA GPU com CUDA instalado")
+        upscale_layout.addWidget(self.chk_use_gpu, 3, 0, 1, 2)
+
+        # Botão Apply
+        self.btn_apply_upscale = QPushButton("Apply AI Upscale")
+        self.btn_apply_upscale.setStyleSheet("background-color: #28a745; font-weight: bold;")
+        self.btn_apply_upscale.clicked.connect(self.apply_ai_upscale)
+
+        if not REALESRGAN_AVAILABLE:
+            self.btn_apply_upscale.setEnabled(False)
+            self.btn_apply_upscale.setToolTip("Real-ESRGAN não instalado")
+        else:
+            self.btn_apply_upscale.setEnabled(False)
+
+        upscale_layout.addWidget(self.btn_apply_upscale, 4, 0, 1, 2)
+
+        # Label de status
+        self.lbl_upscale_status = QLabel("")
+        self.lbl_upscale_status.setStyleSheet("color: #aaa; font-size: 10px;")
+        self.lbl_upscale_status.setWordWrap(True)
+
+        if not REALESRGAN_AVAILABLE:
+            self.lbl_upscale_status.setText("⚠️ Real-ESRGAN não disponível")
+
+        upscale_layout.addWidget(self.lbl_upscale_status, 5, 0, 1, 2)
+
+        grp_upscale.setLayout(upscale_layout)
+        tab_upscale_layout.addWidget(grp_upscale)
 
 
-        self.tab_widget.addTab(tab_resize, "Resize")
-        self.tab_widget.addTab(tab_transparency, "Transparency")
-        self.tab_widget.addTab(tab_slice, "Slice")
+        tab_upscale_layout.addStretch()
+
+
+        self.tab_widget.addTab(tab_resize, "Adjust")
+        self.tab_widget.addTab(tab_transparency, "Color")
+        self.tab_widget.addTab(tab_slice, "Tools")
+        self.tab_widget.addTab(tab_upscale, "Upscale")
 
         lp_layout.addWidget(self.tab_widget)
 
@@ -548,6 +894,352 @@ class SliceWindow(QWidget):
         rp_layout.addWidget(btn_clear)
 
         content_layout.addWidget(right_panel)
+        
+        
+        
+    def apply_denoise(self):
+        """Aplica filtro de denoise na imagem"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            method = self.combo_denoise_method.currentIndex()
+            strength = self.spin_denoise_strength.value()
+            
+            img = self.current_image_pil.copy()
+            
+            if method == 0:  # Median Filter
+                kernel_size = strength if strength % 2 == 1 else strength + 1
+                img = img.filter(ImageFilter.MedianFilter(size=kernel_size))
+                
+            elif method == 1:  # Gaussian Blur
+                img = img.filter(ImageFilter.GaussianBlur(radius=strength))
+                
+            elif method == 2:  # Smooth
+                for _ in range(strength):
+                    img = img.filter(ImageFilter.SMOOTH)
+                    
+            elif method == 3:  # Smooth More
+                for _ in range(strength):
+                    img = img.filter(ImageFilter.SMOOTH_MORE)
+            
+            self.current_image_pil = img
+            self.update_canvas_image()
+            
+            QMessageBox.information(
+                self,
+                "Denoise Applied",
+                f"Denoise aplicado com sucesso!\nMétodo: {self.combo_denoise_method.currentText()}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao aplicar denoise: {str(e)}")
+
+    def apply_ai_upscale(self):
+        """Aplica AI upscaling usando Real-ESRGAN"""
+        if not self.current_image_pil:
+            return
+        
+        if not REALESRGAN_AVAILABLE:
+            QMessageBox.critical(
+                self,
+                "Dependência Faltando",
+                "Real-ESRGAN não está instalado!"
+            )
+            return
+        
+        # Guardar resolução original
+        original_width = self.current_image_pil.width
+        original_height = self.current_image_pil.height
+        keep_original_size = self.chk_keep_original_size.isChecked()
+        
+        self.btn_apply_upscale.setEnabled(False)
+        self.lbl_upscale_status.setText("⏳ Carregando modelo...")
+        QApplication.processEvents()
+        
+        try:
+            import numpy as np
+            import cv2
+            
+            # Configurar device
+            use_gpu = self.chk_use_gpu.isChecked()
+            device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+            
+            # Determinar modelo e escala
+            model_idx = self.combo_upscale_model.currentIndex()
+            scale_text = self.combo_upscale_factor.currentText()
+            scale = int(scale_text.replace('x', ''))
+            
+            self.lbl_upscale_status.setText(f"⏳ Inicializando modelo...")
+            QApplication.processEvents()
+            
+            # Configurar modelo baseado na seleção
+            if model_idx == 0:  # General x4
+                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+                model_path = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+                netscale = 4
+            elif model_idx == 1:  # Anime x4
+                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+                model_path = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
+                netscale = 4
+            else:  # x2
+                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+                model_path = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
+                netscale = 2
+            
+            # Criar upsampler
+            upsampler = RealESRGANer(
+                scale=netscale,
+                model_path=model_path,
+                model=model,
+                tile=0,
+                tile_pad=10,
+                pre_pad=0,
+                half=False,
+                device=device
+            )
+            
+            self.lbl_upscale_status.setText("⏳ Processando upscale...")
+            QApplication.processEvents()
+            
+            # Converter PIL para numpy array (BGR para OpenCV)
+            img_rgb = self.current_image_pil.convert('RGB')
+            img_np = np.array(img_rgb)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            
+            # Aplicar upscaling
+            output, _ = upsampler.enhance(img_bgr, outscale=scale)
+            
+            # Converter de volta para PIL (BGR -> RGB)
+            output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+            upscaled_image = Image.fromarray(output_rgb)
+            
+            # Se tinha transparência, processar canal alpha
+            if self.current_image_pil.mode == 'RGBA':
+                alpha = self.current_image_pil.split()[-1]
+                alpha_upscaled = alpha.resize(
+                    (upscaled_image.width, upscaled_image.height),
+                    Image.LANCZOS
+                )
+                upscaled_image = upscaled_image.convert('RGBA')
+                upscaled_image.putalpha(alpha_upscaled)
+            
+            # NOVA LÓGICA: Manter resolução original se checkbox marcada
+            if keep_original_size:
+                self.lbl_upscale_status.setText("⏳ Redimensionando para resolução original...")
+                QApplication.processEvents()
+                
+                # Usar LANCZOS para melhor qualidade no downscale
+                upscaled_image = upscaled_image.resize(
+                    (original_width, original_height),
+                    Image.LANCZOS
+                )
+                
+                result_msg = (
+                    f"Imagem processada com sucesso!\n\n"
+                    f"Upscale temporário: {scale}x\n"
+                    f"Resolução final: {original_width}x{original_height} (original mantida)\n"
+                    f"Device: {device}\n\n"
+                    f"Qualidade melhorada através de upscale + downscale!"
+                )
+            else:
+                result_msg = (
+                    f"Imagem upscaled com sucesso!\n\n"
+                    f"Escala: {scale}x\n"
+                    f"Resolução original: {original_width}x{original_height}\n"
+                    f"Nova resolução: {upscaled_image.width}x{upscaled_image.height}\n"
+                    f"Device: {device}"
+                )
+            
+            # Salvar estado
+            self.save_state()
+            
+            # Atualizar imagem
+            self.current_image_pil = upscaled_image
+            self.update_canvas_image()
+            
+            # Atualizar spinboxes
+            self.spin_resize_width.setValue(upscaled_image.width)
+            self.spin_resize_height.setValue(upscaled_image.height)
+            
+            if keep_original_size:
+                self.lbl_upscale_status.setText(
+                    f"✅ Upscale completo!\n"
+                    f"Resolução mantida: {original_width}x{original_height}"
+                )
+            else:
+                self.lbl_upscale_status.setText(
+                    f"✅ Upscale completo! {scale}x\n"
+                    f"Nova resolução: {upscaled_image.width}x{upscaled_image.height}"
+                )
+            
+            QMessageBox.information(
+                self,
+                "AI Upscale Complete",
+                result_msg
+            )
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            self.lbl_upscale_status.setText(f"❌ Erro: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Erro ao aplicar AI upscale:\n{str(e)}\n\n{error_details}"
+            )
+        
+        finally:
+            self.btn_apply_upscale.setEnabled(True)
+
+        
+        
+    def apply_denoise(self):
+        """Aplica filtro de denoise na imagem"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            method = self.combo_denoise_method.currentIndex()
+            strength = self.spin_denoise_strength.value()
+            
+            img = self.current_image_pil.copy()
+            
+            if method == 0:  # Median Filter
+                # Valor ímpar para o kernel
+                kernel_size = strength if strength % 2 == 1 else strength + 1
+                img = img.filter(ImageFilter.MedianFilter(size=kernel_size))
+                
+            elif method == 1:  # Gaussian Blur
+                radius = strength
+                img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+                
+            elif method == 2:  # Smooth
+                for _ in range(strength):
+                    img = img.filter(ImageFilter.SMOOTH)
+                    
+            elif method == 3:  # Smooth More
+                for _ in range(strength):
+                    img = img.filter(ImageFilter.SMOOTH_MORE)
+            
+            self.current_image_pil = img
+            self.update_canvas_image()
+            
+            QMessageBox.information(
+                self,
+                "Denoise Applied",
+                f"Denoise aplicado com sucesso!\nMétodo: {self.combo_denoise_method.currentText()}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao aplicar denoise: {str(e)}")
+        
+        
+        
+        
+    def on_brightness_change(self, value):
+        self.lbl_brightness.setText(str(value))
+
+    def on_contrast_change(self, value):
+        self.lbl_contrast.setText(str(value))
+
+    def on_saturation_change(self, value):
+        self.lbl_saturation.setText(str(value))
+
+    def on_red_change(self, value):
+        self.lbl_red.setText(str(value))
+
+    def on_green_change(self, value):
+        self.lbl_green.setText(str(value))
+
+    def on_blue_change(self, value):
+        self.lbl_blue.setText(str(value))
+
+    def reset_color_sliders(self):
+        """Reseta todos os sliders de cor para 0"""
+        self.slider_brightness.setValue(0)
+        self.slider_contrast.setValue(0)
+        self.slider_saturation.setValue(0)
+        self.slider_red.setValue(0)
+        self.slider_green.setValue(0)
+        self.slider_blue.setValue(0)
+
+    def apply_color_adjustments(self):
+        """Aplica todos os ajustes de cor na imagem"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            from PIL import ImageEnhance
+            import numpy as np
+            
+            img = self.current_image_pil.copy()
+            
+            # 1. Brightness
+            brightness_val = self.slider_brightness.value()
+            if brightness_val != 0:
+                factor = 1.0 + (brightness_val / 100.0)
+                enhancer = ImageEnhance.Brightness(img)
+                img = enhancer.enhance(factor)
+            
+            # 2. Contrast
+            contrast_val = self.slider_contrast.value()
+            if contrast_val != 0:
+                factor = 1.0 + (contrast_val / 100.0)
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(factor)
+            
+            # 3. Saturation
+            saturation_val = self.slider_saturation.value()
+            if saturation_val != 0:
+                factor = 1.0 + (saturation_val / 100.0)
+                enhancer = ImageEnhance.Color(img)
+                img = enhancer.enhance(factor)
+            
+            # 4. RGB Adjustments
+            red_val = self.slider_red.value()
+            green_val = self.slider_green.value()
+            blue_val = self.slider_blue.value()
+            
+            if red_val != 0 or green_val != 0 or blue_val != 0:
+                pixels = img.load()
+                w, h = img.size
+                
+                for y in range(h):
+                    for x in range(w):
+                        r, g, b, a = pixels[x, y]
+                        
+                        # Ajusta cada canal
+                        new_r = max(0, min(255, r + red_val))
+                        new_g = max(0, min(255, g + green_val))
+                        new_b = max(0, min(255, b + blue_val))
+                        
+                        pixels[x, y] = (new_r, new_g, new_b, a)
+            
+            self.current_image_pil = img
+            self.update_canvas_image()
+            
+            QMessageBox.information(
+                self,
+                "Color Adjustments Applied",
+                "Ajustes de cor aplicados com sucesso!"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao aplicar ajustes: {str(e)}")
+           
+        
+        
+    def on_eraser_feathering_change(self, value):
+        """Atualiza o feathering da borracha"""
+        self.eraser_feathering = value
+        
 
     def toggle_paint_mode(self, checked):
         """Ativa/desativa modo pincel"""
@@ -710,7 +1402,7 @@ class SliceWindow(QWidget):
             x = int(x1 + (x2 - x1) * t)
             y = int(y1 + (y2 - y1) * t)
             self.paint_at_point(QPoint(x, y))
-=
+            
     def save_state(self):
         if self.current_image_pil:
             state = self.current_image_pil.copy()
@@ -877,31 +1569,47 @@ class SliceWindow(QWidget):
         self.eraser_size = value
     
     def view_mouse_press(self, event):
-
+        modifiers = QApplication.keyboardModifiers()
+        item_at_pos = self.view.itemAt(event.pos())
+        
         if self.eraser_mode and event.button() == Qt.MouseButton.LeftButton:
             self.save_state()
-            
             scene_pos = self.view.mapToScene(event.pos())
             self.last_eraser_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
             self.erase_at_point(self.last_eraser_point)
+            
         elif self.paint_mode and event.button() == Qt.MouseButton.LeftButton:
             self.save_state()
-            
             scene_pos = self.view.mapToScene(event.pos())
             self.last_paint_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
             self.paint_at_point(self.last_paint_point)
+            
         elif self.selection_mode and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
+            
+            # Se Ctrl está pressionado E há uma seleção existente
+            if modifiers == Qt.KeyboardModifier.ControlModifier and self.selection_rect_item:
+                # Verifica se clicou dentro da seleção
+                if self.selection_rect_item.contains(self.selection_rect_item.mapFromScene(scene_pos)):
+                    self.start_moving_selection(scene_pos)
+                    return
+            
+            # Caso contrário, inicia nova seleção
             self.selection_start = scene_pos
             self.is_drawing_selection = True
             
             if self.selection_rect_item:
                 self.scene.removeItem(self.selection_rect_item)
+                if self.floating_selection_pixmap:
+                    self.scene.removeItem(self.floating_selection_pixmap)
+                    self.floating_selection_pixmap = None
             
             self.selection_rect_item = SelectionRectangle()
             self.scene.addItem(self.selection_rect_item)
         else:
             QGraphicsView.mousePressEvent(self.view, event)
+
+
     
     def view_mouse_move(self, event):
         if self.eraser_mode and event.buttons() & Qt.MouseButton.LeftButton:
@@ -912,6 +1620,7 @@ class SliceWindow(QWidget):
                 self.erase_line(self.last_eraser_point, current_point)
             
             self.last_eraser_point = current_point
+            
         elif self.paint_mode and event.buttons() & Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
             current_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
@@ -920,29 +1629,125 @@ class SliceWindow(QWidget):
                 self.paint_line(self.last_paint_point, current_point)
             
             self.last_paint_point = current_point
-        elif self.selection_mode and self.is_drawing_selection:
-            scene_pos = self.view.mapToScene(event.pos())
-            rect = QRectF(self.selection_start, scene_pos).normalized()
-            self.selection_rect_item.set_rect(rect)
+            
+        elif self.selection_mode:
+            # Movendo seleção com Ctrl
+            if self.is_moving_selection and event.buttons() & Qt.MouseButton.LeftButton:
+                scene_pos = self.view.mapToScene(event.pos())
+                self.move_selection(scene_pos)
+            # Desenhando nova seleção
+            elif self.is_drawing_selection:
+                scene_pos = self.view.mapToScene(event.pos())
+                rect = QRectF(self.selection_start, scene_pos).normalized()
+                self.selection_rect_item.set_rect(rect)
         else:
             QGraphicsView.mouseMoveEvent(self.view, event)
-    
+
     def view_mouse_release(self, event):
         if self.eraser_mode:
             self.last_eraser_point = None
+            
         elif self.paint_mode:
             self.last_paint_point = None
-        elif self.selection_mode and self.is_drawing_selection:
-            self.is_drawing_selection = False
             
-            if self.selection_rect_item and not self.selection_rect_item.rect().isEmpty():
-                self.btn_cut_selection.setEnabled(True)
-                self.btn_copy_selection.setEnabled(True)
-                self.btn_clear_selection.setEnabled(True)
+        elif self.selection_mode:
+            if self.is_moving_selection:
+                self.finish_moving_selection()
+            elif self.is_drawing_selection:
+                self.is_drawing_selection = False
+                
+                if self.selection_rect_item and not self.selection_rect_item.rect().isEmpty():
+                    self.btn_cut_selection.setEnabled(True)
+                    self.btn_copy_selection.setEnabled(True)
+                    self.btn_clear_selection.setEnabled(True)
         else:
             QGraphicsView.mouseReleaseEvent(self.view, event)
+            
+            
+    def start_moving_selection(self, scene_pos):
+        """Inicia o movimento da seleção com Ctrl pressionado"""
+        if not self.current_image_pil or not self.selection_rect_item:
+            return
+        
+        self.save_state()
+        self.is_moving_selection = True
+        self.move_start_pos = scene_pos
+        
+        # Captura a imagem da área selecionada
+        rect = self.selection_rect_item.rect()
+        x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+        
+        # Faz backup da imagem antes de apagar
+        box = (x, y, x + w, y + h)
+        self.selected_image_data = self.current_image_pil.crop(box)
+        
+        # Apaga a área original (torna transparente)
+        transparent_box = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+        self.current_image_pil.paste(transparent_box, (x, y))
+        self.update_canvas_image()
+        
+        # Cria um pixmap flutuante para visualização
+        qim = self.pil_to_qimage(self.selected_image_data)
+        pix = QPixmap.fromImage(qim)
+        
+        if self.floating_selection_pixmap:
+            self.scene.removeItem(self.floating_selection_pixmap)
+        
+        self.floating_selection_pixmap = QGraphicsPixmapItem(pix)
+        self.floating_selection_pixmap.setPos(x, y)
+        self.floating_selection_pixmap.setZValue(20)  # Acima do retângulo de seleção
+        self.scene.addItem(self.floating_selection_pixmap)
+        
+        self.view.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def move_selection(self, scene_pos):
+        """Move a seleção e a imagem junto"""
+        if not self.is_moving_selection or not self.move_start_pos:
+            return
+        
+        # Calcula o deslocamento
+        delta = scene_pos - self.move_start_pos
+        
+        # Move o retângulo de seleção
+        rect = self.selection_rect_item.rect()
+        new_rect = rect.translated(delta.x(), delta.y())
+        self.selection_rect_item.set_rect(new_rect)
+        
+        # Move o pixmap flutuante
+        if self.floating_selection_pixmap:
+            current_pos = self.floating_selection_pixmap.pos()
+            self.floating_selection_pixmap.setPos(current_pos.x() + delta.x(), current_pos.y() + delta.y())
+        
+        # Atualiza a posição de início para o próximo movimento
+        self.move_start_pos = scene_pos
+
+    def finish_moving_selection(self):
+        """Finaliza o movimento e cola a imagem na nova posição"""
+        if not self.is_moving_selection:
+            return
+        
+        # Pega a posição final
+        if self.floating_selection_pixmap:
+            final_pos = self.floating_selection_pixmap.pos()
+            x, y = int(final_pos.x()), int(final_pos.y())
+            
+            # Cola a imagem na nova posição
+            if self.selected_image_data:
+                self.current_image_pil.paste(self.selected_image_data, (x, y))
+                self.update_canvas_image()
+            
+            # Remove o pixmap flutuante
+            self.scene.removeItem(self.floating_selection_pixmap)
+            self.floating_selection_pixmap = None
+        
+        self.is_moving_selection = False
+        self.move_start_pos = None
+        self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+                
+
     
     def erase_at_point(self, point):
+        """Apaga pixels em um ponto com suporte a feathering"""
         if not self.current_image_pil:
             return
         
@@ -952,26 +1757,86 @@ class SliceWindow(QWidget):
         if x < 0 or y < 0 or x >= w or y >= h:
             return
         
-        draw = ImageDraw.Draw(self.current_image_pil, 'RGBA')
         radius = self.eraser_size // 2
         
-        bbox = [x - radius, y - radius, x + radius, y + radius]
-        
-        temp = Image.new('RGBA', self.current_image_pil.size, (0, 0, 0, 0))
-        temp_draw = ImageDraw.Draw(temp)
-        temp_draw.ellipse(bbox, fill=(0, 0, 0, 255))
-        
-        mask = temp.split()[3]
-        
-        pixels = self.current_image_pil.load()
-        mask_pixels = mask.load()
-        
-        for py in range(max(0, y - radius), min(h, y + radius + 1)):
-            for px in range(max(0, x - radius), min(w, x + radius + 1)):
-                if mask_pixels[px, py] > 0:
-                    pixels[px, py] = (0, 0, 0, 0)
+        if self.eraser_feathering == 0:
+            # Borracha com bordas duras (método original)
+            draw = ImageDraw.Draw(self.current_image_pil, 'RGBA')
+            bbox = [x - radius, y - radius, x + radius, y + radius]
+            
+            # Cria máscara temporária
+            temp = Image.new('RGBA', self.current_image_pil.size, (0, 0, 0, 0))
+            temp_draw = ImageDraw.Draw(temp)
+            temp_draw.ellipse(bbox, fill=(0, 0, 0, 255))
+            
+            mask = temp.split()[3]
+            
+            # Aplica a máscara para apagar
+            pixels = self.current_image_pil.load()
+            mask_pixels = mask.load()
+            
+            for py in range(max(0, y - radius), min(h, y + radius + 1)):
+                for px in range(max(0, x - radius), min(w, x + radius + 1)):
+                    if mask_pixels[px, py] > 0:
+                        pixels[px, py] = (0, 0, 0, 0)
+        else:
+            # Borracha com feathering suave
+            blur_radius = int((self.eraser_feathering / 100.0) * radius)
+            
+            # Margem extra para o blur
+            margin = blur_radius + 10
+            temp_size = (radius * 2 + margin * 2, radius * 2 + margin * 2)
+            
+            # Cria máscara de opacidade
+            mask = Image.new('L', temp_size, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            
+            center = radius + margin
+            
+            # Desenha círculo na máscara
+            mask_draw.ellipse(
+                [center - radius, center - radius, center + radius, center + radius],
+                fill=255
+            )
+            
+            # Aplica Gaussian Blur para suavizar
+            if blur_radius > 0:
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            
+            # Posição de colagem
+            paste_x = x - center
+            paste_y = y - center
+            
+            # Aplica a máscara invertida para apagar com suavização
+            # Precisamos trabalhar diretamente com os pixels para criar o efeito de apagar gradual
+            mask_pixels = mask.load()
+            img_pixels = self.current_image_pil.load()
+            
+            for py in range(temp_size[1]):
+                for px in range(temp_size[0]):
+                    img_x = paste_x + px
+                    img_y = paste_y + py
+                    
+                    # Verifica se está dentro dos limites da imagem
+                    if 0 <= img_x < w and 0 <= img_y < h:
+                        # Pega a opacidade da máscara (0-255)
+                        mask_alpha = mask_pixels[px, py]
+                        
+                        if mask_alpha > 0:
+                            # Pega o pixel atual
+                            current_pixel = img_pixels[img_x, img_y]
+                            r, g, b, a = current_pixel
+                            
+                            # Reduz a opacidade baseado na máscara
+                            # mask_alpha = 255 -> apaga completamente
+                            # mask_alpha = 0 -> não apaga
+                            erase_factor = mask_alpha / 255.0
+                            new_alpha = int(a * (1.0 - erase_factor))
+                            
+                            img_pixels[img_x, img_y] = (r, g, b, new_alpha)
         
         self.update_canvas_image()
+
     
     def erase_line(self, start, end):
         if not self.current_image_pil:
@@ -1031,6 +1896,16 @@ class SliceWindow(QWidget):
                 self.btn_choose_color.setEnabled(True)
                 self.btn_pick_paint_color.setEnabled(True)  # NOVO
                 self.btn_toggle_selection.setEnabled(True)
+                self.btn_detect_edges.setEnabled(True)
+                self.btn_outline_color.setEnabled(True)
+                self.btn_apply_outline.setEnabled(True)
+                self.btn_erase_edges.setEnabled(True)
+                self.btn_apply_denoise.setEnabled(True)
+                self.btn_apply_upscale.setEnabled(True)
+
+                
+                
+
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
@@ -1106,6 +1981,178 @@ class SliceWindow(QWidget):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+            
+            
+            
+    def choose_outline_color(self):
+        """Abre o seletor de cor para o outline"""
+        color = QColorDialog.getColor(self.outline_color, self, "Escolher Cor do Outline")
+        
+        if color.isValid():
+            self.outline_color = color
+            self.lbl_outline_color_preview.setStyleSheet(
+                f"background-color: {color.name()}; border: 1px solid #222;"
+            )
+
+    def detect_edges(self):
+        """Detecta bordas na imagem usando Pillow"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            # Converte para escala de cinza para melhor detecção
+            gray = self.current_image_pil.convert('L')
+            
+            # Aplica o filtro de detecção de bordas
+            edges = gray.filter(ImageFilter.FIND_EDGES)
+            
+            # Converte de volta para RGBA
+            edges_rgba = edges.convert('RGBA')
+            
+            # Inverte as cores (bordas ficam brancas no fundo preto)
+            from PIL import ImageOps
+            edges_inverted = ImageOps.invert(edges.convert('RGB'))
+            edges_rgba = edges_inverted.convert('RGBA')
+            
+            # Preserva a transparência original
+            # Cria máscara baseada nas bordas detectadas
+            pixels = edges_rgba.load()
+            original_pixels = self.current_image_pil.load()
+            w, h = edges_rgba.size
+            
+            for y in range(h):
+                for x in range(w):
+                    r, g, b, a = pixels[x, y]
+                    orig_a = original_pixels[x, y][3]
+                    
+                    # Se o pixel é escuro (borda detectada) e estava visível
+                    if r < 128 and orig_a > 0:
+                        pixels[x, y] = (0, 0, 0, 255)  # Borda preta
+                    else:
+                        pixels[x, y] = (0, 0, 0, 0)  # Transparente
+            
+            self.current_image_pil = edges_rgba
+            self.update_canvas_image()
+            
+            QMessageBox.information(self, "Edge Detection", "Bordas detectadas com sucesso!")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao detectar bordas: {str(e)}")
+
+    def apply_outline(self):
+        """Aplica outline (contorno) na imagem"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            thickness = self.spin_outline_thickness.value()
+            feathering = self.spin_outline_feathering.value()
+            
+            # Cor do outline
+            r = self.outline_color.red()
+            g = self.outline_color.green()
+            b = self.outline_color.blue()
+            a = self.outline_color.alpha()
+            
+            w, h = self.current_image_pil.size
+            
+            # Cria uma nova imagem para o outline
+            outline_layer = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+            
+            # Extrai a máscara alfa da imagem original
+            if self.current_image_pil.mode == 'RGBA':
+                alpha_mask = self.current_image_pil.split()[3]
+            else:
+                alpha_mask = Image.new('L', (w, h), 255)
+            
+            # Dilata a máscara para criar o outline
+            from PIL import ImageFilter
+            
+            # Aplica expansão múltiplas vezes para aumentar a espessura
+            expanded_mask = alpha_mask.copy()
+            for _ in range(thickness):
+                expanded_mask = expanded_mask.filter(ImageFilter.MaxFilter(3))
+            
+            # Aplica feathering se necessário
+            if feathering > 0:
+                blur_amount = (feathering / 100.0) * thickness
+                expanded_mask = expanded_mask.filter(ImageFilter.GaussianBlur(radius=blur_amount))
+            
+            # Cria a camada de cor do outline
+            outline_color_layer = Image.new('RGBA', (w, h), (r, g, b, a))
+            
+            # Aplica a máscara expandida
+            outline_layer.paste(outline_color_layer, (0, 0), expanded_mask)
+            
+            # Remove a área da imagem original (para ter só o contorno)
+            outline_pixels = outline_layer.load()
+            alpha_pixels = alpha_mask.load()
+            
+            for y in range(h):
+                for x in range(w):
+                    if alpha_pixels[x, y] > 128:  # Se pixel original era opaco
+                        outline_pixels[x, y] = (0, 0, 0, 0)  # Remove do outline
+            
+            # Combina: outline + imagem original
+            result = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+            result.paste(outline_layer, (0, 0), outline_layer)
+            result.paste(self.current_image_pil, (0, 0), self.current_image_pil)
+            
+            self.current_image_pil = result
+            self.update_canvas_image()
+            
+            QMessageBox.information(self, "Outline Applied", 
+                                  f"Outline de {thickness}px aplicado com sucesso!")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao aplicar outline: {str(e)}")
+
+    def erase_edges(self):
+        """Apaga as bordas da imagem com feathering opcional"""
+        if not self.current_image_pil:
+            return
+        
+        self.save_state()
+        
+        try:
+            distance = self.spin_edge_eraser_distance.value()
+            feathering = self.spin_edge_eraser_feathering.value()
+            
+            w, h = self.current_image_pil.size
+            
+            # Extrai canal alfa
+            if self.current_image_pil.mode == 'RGBA':
+                alpha = self.current_image_pil.split()[3]
+            else:
+                self.current_image_pil = self.current_image_pil.convert('RGBA')
+                alpha = self.current_image_pil.split()[3]
+            
+            # Cria máscara para as bordas
+            # Erode a máscara para criar área interna
+            eroded_mask = alpha.copy()
+            for _ in range(distance):
+                eroded_mask = eroded_mask.filter(ImageFilter.MinFilter(3))
+            
+            # Aplica feathering na transição
+            if feathering > 0:
+                blur_amount = (feathering / 100.0) * distance
+                eroded_mask = eroded_mask.filter(ImageFilter.GaussianBlur(radius=blur_amount))
+            
+            # Aplica a nova máscara alfa
+            self.current_image_pil.putalpha(eroded_mask)
+            
+            self.update_canvas_image()
+            
+            QMessageBox.information(self, "Edge Eraser", 
+                                  f"Bordas apagadas em {distance}px!")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao apagar bordas: {str(e)}")
+            
 
     def enable_color_picker(self):
         """Ativa o modo de seleção de cor diretamente da imagem"""
