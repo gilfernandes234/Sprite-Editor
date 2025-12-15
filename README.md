@@ -17,12 +17,12 @@
 
 ```bash
 # Instalar dependências
-- Python 3.9+
+- Python 3.10+
 
 py -m pip install -r requirements.txt
 
 # Executar 
-python slicerObd.py
+python spriteEditor.py
 ```
 
 
