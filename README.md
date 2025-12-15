@@ -1,6 +1,5 @@
-# Slicer-Resize
+# Sprite Editor 
 
-- Obd Style
 - Resize
 - Color Remove
 - Slicer Png
