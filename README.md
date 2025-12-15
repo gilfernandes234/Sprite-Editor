@@ -22,7 +22,7 @@
 py -m pip install -r requirements.txt
 
 # Executar 
-python spriteEditor.py
+py spriteEditor.py
 ```
 
 
