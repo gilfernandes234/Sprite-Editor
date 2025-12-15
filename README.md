@@ -7,6 +7,7 @@
 - Eraser
 - Rotate
 - Flip
+- Selection/Move
 - Export
 
 
