@@ -1,3 +1,7 @@
+
+
+
+
 import io
 import re
 import sys
@@ -46,6 +50,8 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QDoubleSpinBox,
+    QMenu
 )
 
 
@@ -74,7 +80,7 @@ class Layer:
 
 
 class LayerWidget(QFrame):
-    """Widget para exibir um layer na lista de layers"""
+
 
     selected = pyqtSignal(str)  # Emite o ID do layer
     visibilityChanged = pyqtSignal(str, bool)  # ID e estado de visibilidade
@@ -174,19 +180,19 @@ class LayerWidget(QFrame):
             """)
 
     def on_visibility_changed(self, state):
-        """Callback quando a visibilidade muda"""
+
         self.layer.visible = state == Qt.CheckState.Checked.value
         self.visibilityChanged.emit(self.layer.id, self.layer.visible)
 
     def mousePressEvent(self, event):
-        """Seleciona o layer ao clicar"""
+
         if event.button() == Qt.MouseButton.LeftButton:
             self.selected.emit(self.layer.id)
         super().mousePressEvent(event)
 
 
 class DraggableLayerItem(QGraphicsPixmapItem):
-    """Item gráfico para um layer que pode ser arrastado"""
+
 
     def __init__(self, layer, parent_widget):
         super().__init__()
@@ -450,6 +456,11 @@ class SliceWindow(QWidget):
         self.eraser_size = 10
         self.eraser_feathering = 0  # NOVA VARIÁVEL
         self.last_eraser_point = None
+        
+        self.cut_size_mode = False
+        self.cut_rect_item = None
+        self.is_drawing_cut_rect = False
+        self.cut_start_pos = None        
 
         self.paint_mode = False
         self.paint_size = 5
@@ -603,27 +614,43 @@ class SliceWindow(QWidget):
         self.btn_reset_image.setEnabled(False)
         resize_layout.addWidget(self.btn_reset_image, 5, 0, 1, 2)
 
-        # NOVO: botão para criar projeto vazio com o tamanho escolhido
+
         self.btn_add_blank = QPushButton("Add Blank Image")
         self.btn_add_blank.setStyleSheet(
             "background-color: #6c757d; font-weight: bold; color: white;"
         )
         self.btn_add_blank.clicked.connect(self.add_blank_image)
-        # pode ficar sempre habilitado, ou só depois que abrir algo.
-        # se quiser só pelo resize atual, deixa habilitado direto:
+
         self.btn_add_blank.setEnabled(True)
         resize_layout.addWidget(self.btn_add_blank, 6, 0, 1, 2)
 
-        # Na função init_ui, dentro da tab_resize, após grp_resize:
+        self.btn_cut_size = QPushButton("Cut Size")
+        self.btn_cut_size.setStyleSheet(
+            "background-color: #ff6b35; font-weight: bold; color: white;"
+        )
+        self.btn_cut_size.setCheckable(True)
+        self.btn_cut_size.clicked.connect(self.toggle_cut_size_mode)
+        self.btn_cut_size.setEnabled(False)
+        resize_layout.addWidget(self.btn_cut_size, 7, 0, 1, 2)
+
+
+        self.btn_apply_cut = QPushButton("Apply Cut")
+        self.btn_apply_cut.setStyleSheet(
+            "background-color: #28a745; font-weight: bold; color: white;"
+        )
+        self.btn_apply_cut.clicked.connect(self.apply_cut_size)
+        self.btn_apply_cut.setEnabled(False)
+        resize_layout.addWidget(self.btn_apply_cut, 8, 0, 1, 2)
+
 
         grp_resize.setLayout(resize_layout)
         tab_resize_layout.addWidget(grp_resize)
 
-        # NOVO GRUPO - Edge Detection & Outline
+
         grp_edges = QGroupBox("Edge Detection & Outline")
         edges_layout = QGridLayout()
 
-        # Detector de Bordas
+   
         edges_layout.addWidget(QLabel("Edge Detection:"), 0, 0, 1, 2)
 
         self.btn_detect_edges = QPushButton("Detect Edges")
@@ -938,6 +965,11 @@ class SliceWindow(QWidget):
 
         grp_cells = QGroupBox("Cells")
         grp_cells_layout = QGridLayout()
+        
+        self.chk_subdivisions = QCheckBox("Subdivisions")
+        self.chk_subdivisions.toggled.connect(self.update_grid_visuals)
+        self.chk_subdivisions.setVisible(False)       
+        grp_cells_layout.addWidget(self.chk_subdivisions, 0, 0, 1, 2)        
 
         self.chk_empty = QCheckBox("Empty Sprites")
         self.chk_empty.setToolTip(
@@ -1103,9 +1135,15 @@ class SliceWindow(QWidget):
         denoise_layout.addWidget(self.combo_denoise_method, 0, 1)
 
         denoise_layout.addWidget(QLabel("Strength:"), 1, 0)
-        self.spin_denoise_strength = QSpinBox()
-        self.spin_denoise_strength.setRange(1, 10)
-        self.spin_denoise_strength.setValue(3)
+        self.spin_denoise_strength = QDoubleSpinBox()
+        self.spin_denoise_strength.setRange(0.1, 10.0)
+        self.spin_denoise_strength.setValue(1.0)
+        self.spin_denoise_strength.setSingleStep(0.1)
+        self.spin_denoise_strength.setDecimals(2)
+
+
+
+
         self.spin_denoise_strength.setToolTip(
             "Kernel size para Median ou raio para Gaussian"
         )
@@ -1252,7 +1290,13 @@ class SliceWindow(QWidget):
         self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
         self.list_widget.setIconSize(QSize(32, 32))
         self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self.on_list_context_menu)
+                
+        
         rp_layout.addWidget(self.list_widget)
+        
 
         self.btn_export = QPushButton("Export PNG")
         self.btn_export.setFixedHeight(30)
@@ -1262,6 +1306,16 @@ class SliceWindow(QWidget):
         self.btn_export.clicked.connect(self.export_sprites)
         self.btn_export.setEnabled(False)
         rp_layout.addWidget(self.btn_export)
+        
+        self.btn_import = QPushButton("Import SPR")
+        self.btn_import.setFixedHeight(30)
+        self.btn_import.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        self.btn_import.clicked.connect(self.import_sprites)
+        self.btn_import.setEnabled(False)
+        self.btn_import.setVisible(False)        
+        rp_layout.addWidget(self.btn_import)        
+        
+        
 
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self.clear_list)
@@ -1269,8 +1323,201 @@ class SliceWindow(QWidget):
 
         content_layout.addWidget(right_panel)
 
-        # === PAINEL DE LAYERS (parte inferior) ===
+
         self.create_layers_panel()
+        
+        
+    def on_list_context_menu(self, position):
+        """Exibe menu de contexto ao clicar direito em sprite"""
+        item = self.list_widget.itemAt(position)
+        
+        if not item:
+            return
+        
+        index = self.list_widget.row(item)
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #3a3a3a;
+                color: white;
+                border: 1px solid #555;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #dc3545;
+            }
+        """)
+        
+        delete_action = menu.addAction("🗑️ Delete")
+        delete_action.triggered.connect(lambda: self.delete_sprite_from_list(index))
+        
+        menu.exec(self.list_widget.mapToGlobal(position))
+            
+        
+    def delete_sprite_from_list(self, index):
+        """Remove uma sprite específica da lista"""
+        if index < 0 or index >= len(self.sliced_images):
+            return
+        
+        self.sliced_images.pop(index)
+        self.list_widget.takeItem(index)
+        
+        if len(self.sliced_images) == 0:
+            self.btn_export.setEnabled(False)
+
+        
+        
+    def toggle_cut_size_mode(self, checked):
+        """Ativa/desativa o modo de recorte personalizado"""
+        self.cut_size_mode = checked
+        
+        if checked:
+            # Desativa outros modos
+            if self.eraser_mode:
+                self.btn_toggle_eraser.setChecked(False)
+                self.toggle_eraser_mode(False)
+            if self.paint_mode:
+                self.btn_toggle_paint.setChecked(False)
+                self.toggle_paint_mode(False)
+            if self.selection_mode:
+                self.btn_toggle_selection.setChecked(False)
+                self.toggle_selection_mode(False)
+            
+            self.btn_cut_size.setText("Cancel Cut Size")
+            self.btn_cut_size.setStyleSheet(
+                "background-color: #dc3545; font-weight: bold; color: white;"
+            )
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, False)
+            
+            QMessageBox.information(
+                self,
+                "Cut Size Mode",
+                "Clique e arraste para criar um retângulo de recorte.\n"
+                "O projeto será cortado para o tamanho selecionado."
+            )
+        else:
+            self.btn_cut_size.setText("Cut Size")
+            self.btn_cut_size.setStyleSheet(
+                "background-color: #ff6b35; font-weight: bold; color: white;"
+            )
+            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, True)
+            self.clear_cut_rect()
+
+    def clear_cut_rect(self):
+        """Remove o retângulo de recorte"""
+        if self.cut_rect_item:
+            self.scene.removeItem(self.cut_rect_item)
+            self.cut_rect_item = None
+        self.btn_apply_cut.setEnabled(False)
+
+    def create_cut_rect(self, rect):
+        """Cria o retângulo visual de recorte"""
+        if self.cut_rect_item:
+            self.scene.removeItem(self.cut_rect_item)
+        
+        self.cut_rect_item = QGraphicsRectItem(rect)
+        self.cut_rect_item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.cut_rect_item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.cut_rect_item.setZValue(20)
+        
+        # Estilo visual
+        pen = QPen(QColor(255, 107, 53), 3, Qt.PenStyle.SolidLine)
+        pen.setCosmetic(True)
+        self.cut_rect_item.setPen(pen)
+        self.cut_rect_item.setBrush(QBrush(QColor(255, 107, 53, 50)))
+        
+        self.scene.addItem(self.cut_rect_item)
+        self.btn_apply_cut.setEnabled(True)
+
+    def apply_cut_size(self):
+        """Aplica o corte baseado no retângulo desenhado"""
+        if not self.cut_rect_item or not self.current_image_pil:
+            return
+        
+        # Obtém as coordenadas do retângulo
+        rect = self.cut_rect_item.rect()
+        pos = self.cut_rect_item.pos()
+        
+        x = int(pos.x() + rect.x())
+        y = int(pos.y() + rect.y())
+        width = int(rect.width())
+        height = int(rect.height())
+        
+        # Validação
+        if width <= 0 or height <= 0:
+            QMessageBox.warning(self, "Invalid Size", "O retângulo deve ter tamanho válido!")
+            return
+        
+        # Confirma com o usuário
+        reply = QMessageBox.question(
+            self,
+            "Confirm Cut",
+            f"Cortar projeto para:\n"
+            f"Position: ({x}, {y})\n"
+            f"Size: {width}x{height}px\n\n"
+            f"Esta ação irá redimensionar o projeto main.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.save_state()
+        
+        try:
+            # Cria uma nova imagem com o tamanho do recorte
+            new_image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            
+            # Calcula a área de colagem
+            paste_x = max(0, -x)
+            paste_y = max(0, -y)
+            
+            crop_x = max(0, x)
+            crop_y = max(0, y)
+            crop_w = min(self.current_image_pil.width - crop_x, width)
+            crop_h = min(self.current_image_pil.height - crop_y, height)
+            
+            if crop_w > 0 and crop_h > 0:
+                cropped = self.current_image_pil.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+                new_image.paste(cropped, (paste_x, paste_y))
+            
+            # Atualiza a imagem
+            self.current_image_pil = new_image
+            self.original_image_pil = new_image.copy()
+            
+            # Atualiza o layer main
+            main_layer = self.get_main_layer()
+            if main_layer:
+                main_layer.image = new_image.copy()
+                if main_layer.id in self.layer_widgets:
+                    self.layer_widgets[main_layer.id].update_thumbnail()
+            
+            # Atualiza UI
+            self.update_canvas_image()
+            self.spin_resize_width.setValue(width)
+            self.spin_resize_height.setValue(height)
+            
+            # Limpa o retângulo e desativa o modo
+            self.clear_cut_rect()
+            self.btn_cut_size.setChecked(False)
+            self.toggle_cut_size_mode(False)
+            
+            QMessageBox.information(
+                self,
+                "Cut Complete",
+                f"Projeto cortado para {width}x{height}px com sucesso!"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao cortar: {str(e)}")
+        
+        
+        
 
     def on_brush_type_change(self, text):
         self.brush_type = text
@@ -1297,9 +1544,7 @@ class SliceWindow(QWidget):
             self.scene.addItem(self.fine_grid_item)
             self.fine_grid_item.set_visible(self.fine_grid_enabled)
 
-    # ============================================
-    # === SISTEMA DE LAYERS ===
-    # ============================================
+
 
     def create_layers_panel(self):
         """Cria o painel de layers na parte inferior"""
@@ -1965,23 +2210,27 @@ class SliceWindow(QWidget):
 
         try:
             method = self.combo_denoise_method.currentIndex()
-            strength = self.spin_denoise_strength.value()
-
+            strength = float(self.spin_denoise_strength.value())  # Força float
+            
             img = self.current_image_pil.copy()
 
             if method == 0:  # Median Filter
-                kernel_size = strength if strength % 2 == 1 else strength + 1
+                # Converte para int e garante que é ímpar
+                kernel_size = int(strength * 2) + 1
+                if kernel_size < 1:
+                    kernel_size = 1
                 img = img.filter(ImageFilter.MedianFilter(size=kernel_size))
 
             elif method == 1:  # Gaussian Blur
+                # Gaussian aceita float diretamente
                 img = img.filter(ImageFilter.GaussianBlur(radius=strength))
 
             elif method == 2:  # Smooth
-                for _ in range(strength):
+                for _ in range(max(1, int(strength))):
                     img = img.filter(ImageFilter.SMOOTH)
 
             elif method == 3:  # Smooth More
-                for _ in range(strength):
+                for _ in range(max(1, int(strength))):
                     img = img.filter(ImageFilter.SMOOTH_MORE)
 
             self.current_image_pil = img
@@ -1990,11 +2239,15 @@ class SliceWindow(QWidget):
             QMessageBox.information(
                 self,
                 "Denoise Applied",
-                f"Denoise aplicado com sucesso!\nMétodo: {self.combo_denoise_method.currentText()}",
+                f"Denoise aplicado com sucesso!\n"
+                f"Método: {self.combo_denoise_method.currentText()}\n"
+                f"Força: {strength}"
             )
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Erro ao aplicar denoise: {str(e)}")
+
+
 
     def apply_ai_upscale(self):
         if not self.current_image_pil:
@@ -2168,46 +2421,7 @@ class SliceWindow(QWidget):
         finally:
             self.btn_apply_upscale.setEnabled(True)
 
-    def apply_denoise(self):
-        if not self.current_image_pil:
-            return
 
-        self.save_state()
-
-        try:
-            method = self.combo_denoise_method.currentIndex()
-            strength = self.spin_denoise_strength.value()
-
-            img = self.current_image_pil.copy()
-
-            if method == 0:  # Median Filter
-                # Valor ímpar para o kernel
-                kernel_size = strength if strength % 2 == 1 else strength + 1
-                img = img.filter(ImageFilter.MedianFilter(size=kernel_size))
-
-            elif method == 1:  # Gaussian Blur
-                radius = strength
-                img = img.filter(ImageFilter.GaussianBlur(radius=radius))
-
-            elif method == 2:  # Smooth
-                for _ in range(strength):
-                    img = img.filter(ImageFilter.SMOOTH)
-
-            elif method == 3:  # Smooth More
-                for _ in range(strength):
-                    img = img.filter(ImageFilter.SMOOTH_MORE)
-
-            self.current_image_pil = img
-            self.update_canvas_image()
-
-            QMessageBox.information(
-                self,
-                "Denoise Applied",
-                f"Denoise aplicado com sucesso!\nMétodo: {self.combo_denoise_method.currentText()}",
-            )
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Erro ao aplicar denoise: {str(e)}")
 
     def on_brightness_change(self, value):
         self.lbl_brightness.setText(str(value))
@@ -2765,6 +2979,15 @@ class SliceWindow(QWidget):
     def view_mouse_press(self, event):
         modifiers = QApplication.keyboardModifiers()
         item_at_pos = self.view.itemAt(event.pos())
+        
+        
+        
+        if self.cut_size_mode:
+            scene_pos = self.view.mapToScene(event.pos())
+            self.cut_start_pos = scene_pos
+            self.is_drawing_cut_rect = True
+            event.accept()
+            return        
 
         if self.eraser_mode and event.button() == Qt.MouseButton.LeftButton:
             self.save_state()
@@ -2806,6 +3029,28 @@ class SliceWindow(QWidget):
             QGraphicsView.mousePressEvent(self.view, event)
 
     def view_mouse_move(self, event):
+        
+        
+        if self.cut_size_mode and self.is_drawing_cut_rect and self.cut_start_pos:
+            scene_pos = self.view.mapToScene(event.pos())
+            
+            x1 = min(self.cut_start_pos.x(), scene_pos.x())
+            y1 = min(self.cut_start_pos.y(), scene_pos.y())
+            x2 = max(self.cut_start_pos.x(), scene_pos.x())
+            y2 = max(self.cut_start_pos.y(), scene_pos.y())
+            
+            width = x2 - x1
+            height = y2 - y1
+            
+            if width > 0 and height > 0:
+                rect = QRectF(x1, y1, width, height)
+                self.create_cut_rect(rect)
+            
+            event.accept()
+            return
+                
+        
+        
         if self.eraser_mode and event.buttons() & Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
             current_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
@@ -2814,6 +3059,10 @@ class SliceWindow(QWidget):
                 self.erase_line(self.last_eraser_point, current_point)
 
             self.last_eraser_point = current_point
+            
+            
+            
+           
 
         elif self.paint_mode and event.buttons() & Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
@@ -2837,6 +3086,14 @@ class SliceWindow(QWidget):
             QGraphicsView.mouseMoveEvent(self.view, event)
 
     def view_mouse_release(self, event):
+        
+     # NOVO: Cut Size Mode
+        if self.cut_size_mode and self.is_drawing_cut_rect:
+            self.is_drawing_cut_rect = False
+            event.accept()
+            return       
+        
+        
         if self.eraser_mode:
             self.last_eraser_point = None
 
@@ -3069,6 +3326,7 @@ class SliceWindow(QWidget):
                 self.btn_apply_color.setEnabled(True)
                 self.btn_reset_color.setEnabled(True)
                 self.chk_enable_fine_grid.setEnabled(True)
+                self.btn_cut_size.setEnabled(True)                
 
                 # Onde você habilita os outros botões:
                 if REMBG_AVAILABLE:  # ← Use a variável global
@@ -3140,6 +3398,7 @@ class SliceWindow(QWidget):
         self.btn_apply_color.setEnabled(True)
         self.btn_reset_color.setEnabled(True)
         self.chk_enable_fine_grid.setEnabled(True)
+        self.btn_cut_size.setEnabled(True)        
 
         # IA bg remover depende de REMBG_AVAILABLE
         if REMBG_AVAILABLE:
@@ -3601,6 +3860,24 @@ class SliceWindow(QWidget):
         self.sliced_images.clear()
         self.list_widget.clear()
         self.btn_export.setEnabled(False)
+        self.btn_import.setEnabled(False)        
+        
+        
+    def import_sprites(self):
+        if not self.sliced_images:
+            return
+        
+        reply = QMessageBox.question(
+            self, "Import", 
+            f"Import {len(self.sliced_images)} sprites to the editor?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.sprites_imported.emit(self.sliced_images)
+            self.close()
+        
+        
 
     def export_sprites(self):
         if not self.sliced_images:
