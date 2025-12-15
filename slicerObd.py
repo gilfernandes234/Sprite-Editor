@@ -1,6 +1,6 @@
 import sys
 import io
-from PIL import Image
+from PIL import Image, ImageDraw
 import re
 
 from PyQt6.QtWidgets import (
@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsObject,
     QGroupBox, QAbstractItemView, QApplication, QTabWidget, QComboBox, QLineEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QSize, QPoint
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QIcon
 
 class GridOverlay(QGraphicsObject):
@@ -84,7 +84,12 @@ class SliceWindow(QWidget):
         self.current_image_pil = None 
         self.sliced_images = []     
         self.cell_size = 32
-        self.color_picker_mode = False        
+        self.color_picker_mode = False
+        
+        # Variáveis para o eraser
+        self.eraser_mode = False
+        self.eraser_size = 10
+        self.last_eraser_point = None
 
         self.init_ui()
 
@@ -182,7 +187,7 @@ class SliceWindow(QWidget):
         tab_resize_layout.addStretch()
         
         
-        # Aba 2: Transparency (nova aba)
+        # Aba 2: Transparency
         tab_transparency = QWidget()
         tab_transparency_layout = QVBoxLayout(tab_transparency)
 
@@ -276,13 +281,35 @@ class SliceWindow(QWidget):
         self.btn_cut.setStyleSheet("background-color: #007acc; font-weight: bold; color: white;")
         self.btn_cut.clicked.connect(self.cut_image)
         tab_slice_layout.addWidget(self.btn_cut)
+        
+        # ===== ERASER SECTION (NOVA) =====
+        grp_eraser = QGroupBox("Eraser Tool")
+        eraser_layout = QGridLayout()
+        
+        eraser_layout.addWidget(QLabel("Brush Size:"), 0, 0)
+        self.spin_eraser_size = QSpinBox()
+        self.spin_eraser_size.setRange(1, 100)
+        self.spin_eraser_size.setValue(10)
+        self.spin_eraser_size.valueChanged.connect(self.on_eraser_size_change)
+        eraser_layout.addWidget(self.spin_eraser_size, 0, 1)
+        
+        self.btn_toggle_eraser = QPushButton("Enable Eraser")
+        self.btn_toggle_eraser.setCheckable(True)
+        self.btn_toggle_eraser.setStyleSheet("background-color: #ff6b6b; font-weight: bold;")
+        self.btn_toggle_eraser.clicked.connect(self.toggle_eraser_mode)
+        self.btn_toggle_eraser.setEnabled(False)
+        eraser_layout.addWidget(self.btn_toggle_eraser, 1, 0, 1, 2)
+        
+        grp_eraser.setLayout(eraser_layout)
+        tab_slice_layout.addWidget(grp_eraser)
+        # ===== FIM ERASER SECTION =====
 
         tab_slice_layout.addStretch()
 
         # Adicionar abas ao TabWidget
         self.tab_widget.addTab(tab_resize, "Resize")
-        self.tab_widget.addTab(tab_transparency, "Transparency")  # NOVA ABA
-        self.tab_widget.addTab(tab_slice, "Slice")  # Agora é a aba 3
+        self.tab_widget.addTab(tab_transparency, "Transparency")
+        self.tab_widget.addTab(tab_slice, "Slice")
 
         lp_layout.addWidget(self.tab_widget)
 
@@ -311,6 +338,12 @@ class SliceWindow(QWidget):
         self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.setStyleSheet("border: none;")
+        
+        # Sobrescrever eventos de mouse para eraser
+        self.view.mousePressEvent = self.view_mouse_press
+        self.view.mouseMoveEvent = self.view_mouse_move
+        self.view.mouseReleaseEvent = self.view_mouse_release
+        
         content_layout.addWidget(self.view, 1)
 
 
@@ -351,9 +384,120 @@ class SliceWindow(QWidget):
 
         content_layout.addWidget(right_panel)
 
-  
-    def update_grid_visuals(self):
+    # ===== FUNÇÕES DO ERASER =====
+    def toggle_eraser_mode(self, checked):
+        """Ativa/desativa o modo borracha"""
+        self.eraser_mode = checked
+        
+        if checked:
+            self.btn_toggle_eraser.setText("Disable Eraser")
+            self.btn_toggle_eraser.setStyleSheet("background-color: #51cf66; font-weight: bold;")
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, False)
+        else:
+            self.btn_toggle_eraser.setText("Enable Eraser")
+            self.btn_toggle_eraser.setStyleSheet("background-color: #ff6b6b; font-weight: bold;")
+            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, True)
+            self.last_eraser_point = None
+    
+    def on_eraser_size_change(self, value):
+        """Atualiza o tamanho da borracha"""
+        self.eraser_size = value
+    
+    def view_mouse_press(self, event):
+        """Evento de mouse press - inicia desenho com borracha"""
+        if self.eraser_mode and event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.view.mapToScene(event.pos())
+            self.last_eraser_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
+            self.erase_at_point(self.last_eraser_point)
+        else:
+            # Comportamento padrão do QGraphicsView
+            QGraphicsView.mousePressEvent(self.view, event)
+    
+    def view_mouse_move(self, event):
+        """Evento de mouse move - desenha linha com borracha"""
+        if self.eraser_mode and event.buttons() & Qt.MouseButton.LeftButton:
+            scene_pos = self.view.mapToScene(event.pos())
+            current_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
+            
+            if self.last_eraser_point:
+                self.erase_line(self.last_eraser_point, current_point)
+            
+            self.last_eraser_point = current_point
+        else:
+            QGraphicsView.mouseMoveEvent(self.view, event)
+    
+    def view_mouse_release(self, event):
+        """Evento de mouse release - finaliza desenho"""
+        if self.eraser_mode:
+            self.last_eraser_point = None
+        else:
+            QGraphicsView.mouseReleaseEvent(self.view, event)
+    
+    def erase_at_point(self, point):
+        """Apaga pixels em um ponto específico"""
+        if not self.current_image_pil:
+            return
+        
+        x, y = point.x(), point.y()
+        w, h = self.current_image_pil.size
+        
+        # Verificar se está dentro da imagem
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return
+        
+        # Criar máscara circular para borracha
+        draw = ImageDraw.Draw(self.current_image_pil, 'RGBA')
+        radius = self.eraser_size // 2
+        
+        # Desenhar círculo transparente
+        bbox = [x - radius, y - radius, x + radius, y + radius]
+        
+        # Criar imagem temporária para fazer o "apagamento"
+        temp = Image.new('RGBA', self.current_image_pil.size, (0, 0, 0, 0))
+        temp_draw = ImageDraw.Draw(temp)
+        temp_draw.ellipse(bbox, fill=(0, 0, 0, 255))
+        
+        # Converter para máscara
+        mask = temp.split()[3]  # Canal alpha
+        
+        # Apagar usando composição
+        pixels = self.current_image_pil.load()
+        mask_pixels = mask.load()
+        
+        for py in range(max(0, y - radius), min(h, y + radius + 1)):
+            for px in range(max(0, x - radius), min(w, x + radius + 1)):
+                if mask_pixels[px, py] > 0:
+                    pixels[px, py] = (0, 0, 0, 0)
+        
+        self.update_canvas_image()
+    
+    def erase_line(self, start, end):
+        """Apaga pixels ao longo de uma linha (para movimento suave)"""
+        if not self.current_image_pil:
+            return
+        
+        # Interpolação linear entre pontos
+        x1, y1 = start.x(), start.y()
+        x2, y2 = end.x(), end.y()
+        
+        distance = max(abs(x2 - x1), abs(y2 - y1))
+        
+        if distance == 0:
+            self.erase_at_point(start)
+            return
+        
+        for i in range(distance + 1):
+            t = i / distance
+            x = int(x1 + (x2 - x1) * t)
+            y = int(y1 + (y2 - y1) * t)
+            self.erase_at_point(QPoint(x, y))
+    # ===== FIM FUNÇÕES DO ERASER =====
 
+    def update_grid_visuals(self):
         rows = self.spin_rows.value()
         cols = self.spin_cols.value()
         subs = self.chk_subdivisions.isChecked()
@@ -383,8 +527,9 @@ class SliceWindow(QWidget):
                 # Habilitar botões
                 self.btn_apply_resize.setEnabled(True)
                 self.btn_reset_image.setEnabled(True)
-                self.btn_pick_color.setEnabled(True)  # ADICIONAR
-                self.btn_remove_color.setEnabled(True)  # ADICIONAR
+                self.btn_pick_color.setEnabled(True)
+                self.btn_remove_color.setEnabled(True)
+                self.btn_toggle_eraser.setEnabled(True)  # NOVO
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
@@ -470,7 +615,11 @@ class SliceWindow(QWidget):
         """Ativa o modo de seleção de cor diretamente da imagem"""
         self.color_picker_mode = True
         self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        
+        # Salvar referência ao método original
+        self.original_mouse_press = self.view.mousePressEvent
         self.view.mousePressEvent = self.pick_color_from_image
+        
         QMessageBox.information(
             self,
             "Color Picker",
@@ -503,10 +652,10 @@ class SliceWindow(QWidget):
                 f"Cor selecionada: {hex_color}\nRGB: ({r}, {g}, {b})"
             )
         
-        # Desativar modo de seleção
+        # Desativar modo de seleção e restaurar comportamento original
         self.color_picker_mode = False
         self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
-        self.view.mousePressEvent = lambda e: None
+        self.view.mousePressEvent = self.view_mouse_press
                     
 
                 
