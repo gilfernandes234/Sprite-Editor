@@ -1,7 +1,8 @@
 # Sprite Editor 
 
 - Resize
-- Color Adjust/Remove
+- Color Adjust
+- Background Remove
 - Paint Brush
 - Slicer Png
 - Eraser
@@ -12,8 +13,6 @@
 - Denoise
 - Upscale
 - Export
-
-
 
 
 ```bash
@@ -27,4 +26,7 @@ python slicerObd.py
 ```
 
 
-<img width="1919" height="1043" alt="Screenshot_2" src="https://github.com/user-attachments/assets/83b2772b-8dcf-41aa-8ed5-68a3123f2230" />
+
+https://github.com/user-attachments/assets/5d31c869-5efe-46cf-8c6f-16cb20dece51
+
+
