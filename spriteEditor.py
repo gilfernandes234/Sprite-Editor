@@ -1,6 +1,6 @@
 import sys
 import io
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 import re
 from copy import deepcopy
 
@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QFrame, QGridLayout, QMessageBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsObject,
     QGroupBox, QAbstractItemView, QApplication, QTabWidget, QComboBox, QLineEdit,
-    QGraphicsRectItem
+    QGraphicsRectItem, QColorDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QSize, QPoint, QPointF
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QIcon, QBrush, QWheelEvent, QKeyEvent
@@ -73,37 +73,30 @@ class GridOverlay(QGraphicsObject):
         self.prepareGeometryChange()
         self.update()
 
-# ============================================================================
-# CLASSE PARA RETÂNGULO DE SELEÇÃO
-# ============================================================================
 
 class SelectionRectangle(QGraphicsRectItem):
-    """Retângulo de seleção arrastável"""
+
     
     def __init__(self):
         super().__init__()
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
-        self.setZValue(15)  # Acima da grid
+        self.setZValue(15)
         
-        # Estilo do retângulo
+
         pen = QPen(QColor(0, 150, 255), 2, Qt.PenStyle.DashLine)
         pen.setCosmetic(True)
         self.setPen(pen)
-        
-        # Preenchimento semi-transparente
+
         self.setBrush(QBrush(QColor(0, 150, 255, 30)))
         
     def set_rect(self, rect):
         """Define o retângulo de seleção"""
         self.setRect(rect)
 
-# ============================================================================
-# CUSTOM QGRAPHICSVIEW COM ZOOM POR CTRL+SCROLL
-# ============================================================================
 
 class ZoomableGraphicsView(QGraphicsView):
-    """QGraphicsView com suporte a zoom via Ctrl+Scroll"""
+
     
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -111,47 +104,43 @@ class ZoomableGraphicsView(QGraphicsView):
         self.zoom_factor = 1.0
         
     def wheelEvent(self, event: QWheelEvent):
-        """Zoom com Ctrl+Scroll do mouse"""
+
         modifiers = QApplication.keyboardModifiers()
         
         if modifiers == Qt.KeyboardModifier.ControlModifier:
-            # Zoom in/out
+     
             zoom_in_factor = 1.15
             zoom_out_factor = 1 / zoom_in_factor
-            
-            # Salvar posição do mouse na cena antes do zoom
+           
             old_pos = self.mapToScene(event.position().toPoint())
             
-            # Aplicar zoom
+         
             if event.angleDelta().y() > 0:
                 factor = zoom_in_factor
                 self.zoom_factor *= zoom_in_factor
             else:
                 factor = zoom_out_factor
                 self.zoom_factor *= zoom_out_factor
-            
-            # Limitar zoom (10% a 500%)
+        
             if 0.1 <= self.zoom_factor <= 5.0:
                 self.scale(factor, factor)
-                
-                # Ajustar viewport para manter mouse na mesma posição
+             
                 new_pos = self.mapToScene(event.position().toPoint())
                 delta = new_pos - old_pos
                 self.translate(delta.x(), delta.y())
                 
-                # Atualizar label de zoom no parent
+               
                 if hasattr(self.parent(), 'update_zoom_label'):
                     self.parent().update_zoom_label(int(self.zoom_factor * 100))
             else:
-                # Reverter se ultrapassar limites
+             
                 self.zoom_factor /= factor
             
             event.accept()
         else:
-            # Scroll normal
+         
             super().wheelEvent(event)
 
-# ============================================================================
 
 class SliceWindow(QWidget):
 
@@ -165,23 +154,31 @@ class SliceWindow(QWidget):
         self.sliced_images = []     
         self.cell_size = 32
         self.color_picker_mode = False
+        self.paint_color_picker_mode = False  
         
-        # Variáveis para o eraser
+
         self.eraser_mode = False
         self.eraser_size = 10
         self.last_eraser_point = None
         
-        # Variáveis para seleção
+
+        self.paint_mode = False
+        self.paint_size = 5
+        self.paint_color = QColor(0, 0, 0, 255)
+        self.last_paint_point = None
+        self.paint_feathering = 0  
+        
+
         self.selection_mode = False
         self.selection_start = None
         self.selection_rect_item = None
         self.is_drawing_selection = False
         self.selected_image_data = None
         
-        # Sistema de Undo/Redo
-        self.undo_stack = []  # Pilha de estados anteriores
-        self.redo_stack = []  # Pilha de estados desfeitos
-        self.max_undo_steps = 20  # Limitar memória
+     
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_undo_steps = 20
 
         self.init_ui()
 
@@ -190,7 +187,6 @@ class SliceWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # --- Toolbar ---
         toolbar = QFrame()
         toolbar.setFixedHeight(40)
         toolbar.setStyleSheet("background-color: #333; border-bottom: 1px solid #222;")
@@ -224,7 +220,6 @@ class SliceWindow(QWidget):
         left_panel.setStyleSheet("QFrame { background-color: #444; border-right: 1px solid #222; } QLabel { color: #ddd; }")
         lp_layout = QVBoxLayout(left_panel)
 
-        # Criar TabWidget
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #222; background: #444; }
@@ -232,7 +227,7 @@ class SliceWindow(QWidget):
             QTabBar::tab:selected { background: #555; color: white; }
         """)
 
-        # Aba 1: Resize
+
         tab_resize = QWidget()
         tab_resize_layout = QVBoxLayout(tab_resize)
 
@@ -279,7 +274,6 @@ class SliceWindow(QWidget):
         tab_resize_layout.addStretch()
         
         
-        # Aba 2: Transparency
         tab_transparency = QWidget()
         tab_transparency_layout = QVBoxLayout(tab_transparency)
 
@@ -322,9 +316,6 @@ class SliceWindow(QWidget):
         tab_transparency_layout.addStretch()
 
 
-        
-     
-        # Aba 3: Slice/Cut
         tab_slice = QWidget()
         tab_slice_layout = QVBoxLayout(tab_slice)
 
@@ -374,7 +365,6 @@ class SliceWindow(QWidget):
         self.btn_cut.clicked.connect(self.cut_image)
         tab_slice_layout.addWidget(self.btn_cut)
         
-        # ===== ERASER SECTION =====
         grp_eraser = QGroupBox("Eraser Tool")
         eraser_layout = QGridLayout()
         
@@ -395,7 +385,55 @@ class SliceWindow(QWidget):
         grp_eraser.setLayout(eraser_layout)
         tab_slice_layout.addWidget(grp_eraser)
         
-        # ===== SELECTION SECTION =====
+   
+        grp_paint = QGroupBox("Paint Brush")
+        paint_layout = QGridLayout()
+        
+        paint_layout.addWidget(QLabel("Brush Size:"), 0, 0)
+        self.spin_paint_size = QSpinBox()
+        self.spin_paint_size.setRange(1, 100)
+        self.spin_paint_size.setValue(5)
+        self.spin_paint_size.valueChanged.connect(self.on_paint_size_change)
+        paint_layout.addWidget(self.spin_paint_size, 0, 1)
+        
+
+        paint_layout.addWidget(QLabel("Feathering:"), 1, 0)
+        self.spin_paint_feathering = QSpinBox()
+        self.spin_paint_feathering.setRange(0, 100)
+        self.spin_paint_feathering.setValue(0)
+        self.spin_paint_feathering.setSuffix("%")
+        self.spin_paint_feathering.setToolTip("0% = bordas duras, 100% = máxima suavização")
+        self.spin_paint_feathering.valueChanged.connect(self.on_paint_feathering_change)
+        paint_layout.addWidget(self.spin_paint_feathering, 1, 1)
+        
+        self.btn_choose_color = QPushButton("Choose Color")
+        self.btn_choose_color.setStyleSheet("background-color: #555;")
+        self.btn_choose_color.clicked.connect(self.choose_paint_color)
+        self.btn_choose_color.setEnabled(False)
+        paint_layout.addWidget(self.btn_choose_color, 2, 0, 1, 2)
+        
+
+        self.btn_pick_paint_color = QPushButton("Pick Color from Image")
+        self.btn_pick_paint_color.setStyleSheet("background-color: #555;")
+        self.btn_pick_paint_color.clicked.connect(self.enable_paint_color_picker)
+        self.btn_pick_paint_color.setEnabled(False)
+        paint_layout.addWidget(self.btn_pick_paint_color, 3, 0, 1, 2)
+        
+        self.lbl_paint_color_preview = QLabel()
+        self.lbl_paint_color_preview.setFixedHeight(30)
+        self.lbl_paint_color_preview.setStyleSheet("background-color: #000000; border: 1px solid #222;")
+        paint_layout.addWidget(self.lbl_paint_color_preview, 4, 0, 1, 2)
+        
+        self.btn_toggle_paint = QPushButton("Enable Paint")
+        self.btn_toggle_paint.setCheckable(True)
+        self.btn_toggle_paint.setStyleSheet("background-color: #9b59b6; font-weight: bold;")
+        self.btn_toggle_paint.clicked.connect(self.toggle_paint_mode)
+        self.btn_toggle_paint.setEnabled(False)
+        paint_layout.addWidget(self.btn_toggle_paint, 5, 0, 1, 2)
+        
+        grp_paint.setLayout(paint_layout)
+        tab_slice_layout.addWidget(grp_paint)
+
         grp_selection = QGroupBox("Selection Tool")
         selection_layout = QGridLayout()
         
@@ -434,14 +472,14 @@ class SliceWindow(QWidget):
 
         tab_slice_layout.addStretch()
 
-        # Adicionar abas ao TabWidget
+
         self.tab_widget.addTab(tab_resize, "Resize")
         self.tab_widget.addTab(tab_transparency, "Transparency")
         self.tab_widget.addTab(tab_slice, "Slice")
 
         lp_layout.addWidget(self.tab_widget)
 
-        # Zoom (fora das abas, sempre visível)
+
         grp_zoom = QGroupBox("Zoom")
         zoom_layout = QVBoxLayout()
         self.slider_zoom = QSlider(Qt.Orientation.Horizontal)
@@ -461,14 +499,12 @@ class SliceWindow(QWidget):
         self.scene = QGraphicsScene()
         self.scene.setBackgroundBrush(QColor(50, 50, 50))
         
-        # Usar o ZoomableGraphicsView customizado
         self.view = ZoomableGraphicsView(self.scene, self)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.setStyleSheet("border: none;")
         
-        # Sobrescrever eventos de mouse
         self.view.mousePressEvent = self.view_mouse_press
         self.view.mouseMoveEvent = self.view_mouse_move
         self.view.mouseReleaseEvent = self.view_mouse_release
@@ -513,51 +549,201 @@ class SliceWindow(QWidget):
 
         content_layout.addWidget(right_panel)
 
-    # ===== UNDO/REDO SYSTEM =====
+    def toggle_paint_mode(self, checked):
+        """Ativa/desativa modo pincel"""
+        self.paint_mode = checked
+        
+        if checked:
+            if self.eraser_mode:
+                self.btn_toggle_eraser.setChecked(False)
+                self.toggle_eraser_mode(False)
+            if self.selection_mode:
+                self.btn_toggle_selection.setChecked(False)
+                self.toggle_selection_mode(False)
+            
+            self.btn_toggle_paint.setText("Disable Paint")
+            self.btn_toggle_paint.setStyleSheet("background-color: #8e44ad; font-weight: bold;")
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, False)
+        else:
+            self.btn_toggle_paint.setText("Enable Paint")
+            self.btn_toggle_paint.setStyleSheet("background-color: #9b59b6; font-weight: bold;")
+            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, True)
+            self.last_paint_point = None
+    
+    def on_paint_size_change(self, value):
+        self.paint_size = value
+    
+    def on_paint_feathering_change(self, value):
+
+        self.paint_feathering = value
+    
+    def choose_paint_color(self):
+
+        color = QColorDialog.getColor(self.paint_color, self, "Escolher Cor do Pincel")
+        
+        if color.isValid():
+            self.paint_color = color
+            self.lbl_paint_color_preview.setStyleSheet(
+                f"background-color: {color.name()}; border: 1px solid #222;"
+            )
+    
+    def enable_paint_color_picker(self):
+        self.paint_color_picker_mode = True
+        self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        self.view.mousePressEvent = self.pick_paint_color_from_image
+        
+        QMessageBox.information(
+            self,
+            "Pick Paint Color",
+            "Clique na imagem para selecionar uma cor para o pincel"
+        )
+    
+    def pick_paint_color_from_image(self, event):
+        if not self.paint_color_picker_mode or not self.current_image_pil:
+            return
+        
+        scene_pos = self.view.mapToScene(event.pos())
+        x = int(scene_pos.x())
+        y = int(scene_pos.y())
+        
+        w, h = self.current_image_pil.size
+        if 0 <= x < w and 0 <= y < h:
+            pixel = self.current_image_pil.getpixel((x, y))
+            r, g, b, a = pixel  
+            
+
+            self.paint_color = QColor(r, g, b, a)
+            
+            hex_color = f"#{r:02x}{g:02x}{b:02x}"
+            self.lbl_paint_color_preview.setStyleSheet(
+                f"background-color: {hex_color}; border: 1px solid #222;"
+            )
+            
+            QMessageBox.information(
+                self,
+                "Color Selected",
+                f"Cor do pincel: {hex_color}\nRGBA: ({r}, {g}, {b}, {a})"
+            )
+        
+        self.paint_color_picker_mode = False
+        self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self.view.mousePressEvent = self.view_mouse_press
+    
+    def paint_at_point(self, point):
+        if not self.current_image_pil:
+            return
+        
+        x, y = point.x(), point.y()
+        w, h = self.current_image_pil.size
+        
+        if x < 0 or y < 0 or x >= w or y >= h:
+            return
+        
+        radius = self.paint_size // 2
+        
+        r, g, b, a = self.paint_color.red(), self.paint_color.green(), \
+                     self.paint_color.blue(), self.paint_color.alpha()
+        
+        if self.paint_feathering == 0:
+
+            draw = ImageDraw.Draw(self.current_image_pil, 'RGBA')
+            bbox = [x - radius, y - radius, x + radius, y + radius]
+            draw.ellipse(bbox, fill=(r, g, b, a))
+        else:
+
+            blur_radius = int((self.paint_feathering / 100.0) * radius)
+            
+            margin = blur_radius + 10
+            temp_size = (radius * 2 + margin * 2, radius * 2 + margin * 2)
+            
+ 
+            color_layer = Image.new('RGB', temp_size, (r, g, b))
+            
+
+            mask = Image.new('L', temp_size, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            
+            center = radius + margin
+            
+            mask_draw.ellipse(
+                [center - radius, center - radius, center + radius, center + radius],
+                fill=a 
+            )
+            
+      
+            if blur_radius > 0:
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            
+
+            color_layer = color_layer.convert('RGBA')
+            color_layer.putalpha(mask)
+            
+ 
+            paste_x = x - center
+            paste_y = y - center
+            
+
+            self.current_image_pil.alpha_composite(color_layer, (paste_x, paste_y))
+        
+        self.update_canvas_image()
+
+
+    def paint_line(self, start, end):
+        if not self.current_image_pil:
+            return
+        
+        x1, y1 = start.x(), start.y()
+        x2, y2 = end.x(), end.y()
+        
+        distance = max(abs(x2 - x1), abs(y2 - y1))
+        
+        if distance == 0:
+            self.paint_at_point(start)
+            return
+        
+        for i in range(distance + 1):
+            t = i / distance
+            x = int(x1 + (x2 - x1) * t)
+            y = int(y1 + (y2 - y1) * t)
+            self.paint_at_point(QPoint(x, y))
+=
     def save_state(self):
-        """Salva o estado atual da imagem para undo"""
         if self.current_image_pil:
-            # Copiar imagem atual
             state = self.current_image_pil.copy()
             self.undo_stack.append(state)
             
-            # Limitar tamanho do stack
             if len(self.undo_stack) > self.max_undo_steps:
                 self.undo_stack.pop(0)
             
-            # Limpar redo stack quando nova ação é feita
             self.redo_stack.clear()
     
     def undo(self):
-        """Desfaz a última ação (Ctrl+Z)"""
         if not self.undo_stack:
             QMessageBox.information(self, "Undo", "Nada para desfazer!")
             return
         
-        # Salvar estado atual no redo stack
         if self.current_image_pil:
             self.redo_stack.append(self.current_image_pil.copy())
         
-        # Restaurar último estado
         self.current_image_pil = self.undo_stack.pop()
         self.update_canvas_image()
     
     def redo(self):
-        """Refaz a última ação desfeita (Ctrl+Y)"""
         if not self.redo_stack:
             QMessageBox.information(self, "Redo", "Nada para refazer!")
             return
         
-        # Salvar estado atual no undo stack
         if self.current_image_pil:
             self.undo_stack.append(self.current_image_pil.copy())
         
-        # Restaurar estado do redo
         self.current_image_pil = self.redo_stack.pop()
         self.update_canvas_image()
     
     def keyPressEvent(self, event: QKeyEvent):
-        """Captura Ctrl+Z e Ctrl+Y"""
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_Z:
                 self.undo()
@@ -571,25 +757,22 @@ class SliceWindow(QWidget):
         super().keyPressEvent(event)
     
     def update_zoom_label(self, zoom_percentage):
-        """Atualiza label de zoom quando usa Ctrl+Scroll"""
         self.lbl_zoom_val.setText(f"{zoom_percentage}% (Ctrl+Scroll)")
         
-        # Sincronizar slider (sem disparar evento)
         self.slider_zoom.blockSignals(True)
         self.slider_zoom.setValue(zoom_percentage)
         self.slider_zoom.blockSignals(False)
-    
-    # ===== FIM UNDO/REDO =====
 
-    # ===== FUNÇÕES DE SELEÇÃO =====
     def toggle_selection_mode(self, checked):
-        """Ativa/desativa modo de seleção"""
         self.selection_mode = checked
         
         if checked:
             if self.eraser_mode:
                 self.btn_toggle_eraser.setChecked(False)
                 self.toggle_eraser_mode(False)
+            if self.paint_mode:
+                self.btn_toggle_paint.setChecked(False)
+                self.toggle_paint_mode(False)
             
             self.btn_toggle_selection.setText("Disable Selection")
             self.btn_toggle_selection.setStyleSheet("background-color: #27ae60; font-weight: bold;")
@@ -604,7 +787,6 @@ class SliceWindow(QWidget):
             self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, True)
     
     def clear_selection(self):
-        """Remove o retângulo de seleção"""
         if self.selection_rect_item:
             self.scene.removeItem(self.selection_rect_item)
             self.selection_rect_item = None
@@ -614,11 +796,9 @@ class SliceWindow(QWidget):
         self.btn_clear_selection.setEnabled(False)
     
     def cut_selection(self):
-        """Recorta a área selecionada (copia e apaga)"""
         if not self.selection_rect_item or not self.current_image_pil:
             return
         
-        # Salvar estado antes de modificar
         self.save_state()
         
         self.copy_selection()
@@ -635,7 +815,6 @@ class SliceWindow(QWidget):
         QMessageBox.information(self, "Cut", "Seleção recortada! Use 'Paste' para colar.")
     
     def copy_selection(self):
-        """Copia a área selecionada"""
         if not self.selection_rect_item or not self.current_image_pil:
             return
         
@@ -654,11 +833,9 @@ class SliceWindow(QWidget):
         QMessageBox.information(self, "Copy", f"Área de {w}x{h}px copiada!")
     
     def paste_selection(self):
-        """Cola a área copiada no centro"""
         if not self.selected_image_data or not self.current_image_pil:
             return
         
-        # Salvar estado antes de modificar
         self.save_state()
         
         img_w, img_h = self.current_image_pil.size
@@ -672,17 +849,16 @@ class SliceWindow(QWidget):
         
         QMessageBox.information(self, "Paste", f"Colado em ({x}, {y})")
     
-    # ===== FIM FUNÇÕES DE SELEÇÃO =====
-
-    # ===== FUNÇÕES DO ERASER =====
     def toggle_eraser_mode(self, checked):
-        """Ativa/desativa o modo borracha"""
         self.eraser_mode = checked
         
         if checked:
             if self.selection_mode:
                 self.btn_toggle_selection.setChecked(False)
                 self.toggle_selection_mode(False)
+            if self.paint_mode:
+                self.btn_toggle_paint.setChecked(False)
+                self.toggle_paint_mode(False)
             
             self.btn_toggle_eraser.setText("Disable Eraser")
             self.btn_toggle_eraser.setStyleSheet("background-color: #51cf66; font-weight: bold;")
@@ -698,18 +874,22 @@ class SliceWindow(QWidget):
             self.last_eraser_point = None
     
     def on_eraser_size_change(self, value):
-        """Atualiza o tamanho da borracha"""
         self.eraser_size = value
     
     def view_mouse_press(self, event):
-        """Evento de mouse press"""
+
         if self.eraser_mode and event.button() == Qt.MouseButton.LeftButton:
-            # Salvar estado antes de começar a apagar
             self.save_state()
             
             scene_pos = self.view.mapToScene(event.pos())
             self.last_eraser_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
             self.erase_at_point(self.last_eraser_point)
+        elif self.paint_mode and event.button() == Qt.MouseButton.LeftButton:
+            self.save_state()
+            
+            scene_pos = self.view.mapToScene(event.pos())
+            self.last_paint_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
+            self.paint_at_point(self.last_paint_point)
         elif self.selection_mode and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
             self.selection_start = scene_pos
@@ -724,7 +904,6 @@ class SliceWindow(QWidget):
             QGraphicsView.mousePressEvent(self.view, event)
     
     def view_mouse_move(self, event):
-        """Evento de mouse move"""
         if self.eraser_mode and event.buttons() & Qt.MouseButton.LeftButton:
             scene_pos = self.view.mapToScene(event.pos())
             current_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
@@ -733,6 +912,14 @@ class SliceWindow(QWidget):
                 self.erase_line(self.last_eraser_point, current_point)
             
             self.last_eraser_point = current_point
+        elif self.paint_mode and event.buttons() & Qt.MouseButton.LeftButton:
+            scene_pos = self.view.mapToScene(event.pos())
+            current_point = QPoint(int(scene_pos.x()), int(scene_pos.y()))
+            
+            if self.last_paint_point:
+                self.paint_line(self.last_paint_point, current_point)
+            
+            self.last_paint_point = current_point
         elif self.selection_mode and self.is_drawing_selection:
             scene_pos = self.view.mapToScene(event.pos())
             rect = QRectF(self.selection_start, scene_pos).normalized()
@@ -741,9 +928,10 @@ class SliceWindow(QWidget):
             QGraphicsView.mouseMoveEvent(self.view, event)
     
     def view_mouse_release(self, event):
-        """Evento de mouse release"""
         if self.eraser_mode:
             self.last_eraser_point = None
+        elif self.paint_mode:
+            self.last_paint_point = None
         elif self.selection_mode and self.is_drawing_selection:
             self.is_drawing_selection = False
             
@@ -755,7 +943,6 @@ class SliceWindow(QWidget):
             QGraphicsView.mouseReleaseEvent(self.view, event)
     
     def erase_at_point(self, point):
-        """Apaga pixels em um ponto específico"""
         if not self.current_image_pil:
             return
         
@@ -787,7 +974,6 @@ class SliceWindow(QWidget):
         self.update_canvas_image()
     
     def erase_line(self, start, end):
-        """Apaga pixels ao longo de uma linha"""
         if not self.current_image_pil:
             return
         
@@ -805,7 +991,6 @@ class SliceWindow(QWidget):
             x = int(x1 + (x2 - x1) * t)
             y = int(y1 + (y2 - y1) * t)
             self.erase_at_point(QPoint(x, y))
-    # ===== FIM FUNÇÕES DO ERASER =====
 
     def update_grid_visuals(self):
         rows = self.spin_rows.value()
@@ -820,7 +1005,6 @@ class SliceWindow(QWidget):
                 self.current_image_pil = Image.open(file_path).convert("RGBA")
                 self.original_image_pil = self.current_image_pil.copy()
                 
-                # Limpar stacks ao abrir nova imagem
                 self.undo_stack.clear()
                 self.redo_stack.clear()
                 
@@ -843,6 +1027,9 @@ class SliceWindow(QWidget):
                 self.btn_pick_color.setEnabled(True)
                 self.btn_remove_color.setEnabled(True)
                 self.btn_toggle_eraser.setEnabled(True)
+                self.btn_toggle_paint.setEnabled(True)
+                self.btn_choose_color.setEnabled(True)
+                self.btn_pick_paint_color.setEnabled(True)  # NOVO
                 self.btn_toggle_selection.setEnabled(True)
                 
             except Exception as e:
@@ -850,7 +1037,6 @@ class SliceWindow(QWidget):
                 
                 
     def update_color_preview(self, text):
-        """Atualiza o preview da cor conforme o usuário digita"""
         if self.hex_to_rgb(text):
             self.lbl_preview_color.setStyleSheet(f"background-color: {text}; border: 1px solid #222;")
         else:
@@ -858,7 +1044,6 @@ class SliceWindow(QWidget):
                 
                 
     def hex_to_rgb(self, hex_color):
-        """Converte cor hex (#dcff73) para RGB (220, 255, 115)"""
         hex_color = hex_color.lstrip('#')
         if len(hex_color) != 6:
             return None
@@ -868,11 +1053,9 @@ class SliceWindow(QWidget):
             return None
 
     def remove_color_to_transparent(self):
-        """Remove uma cor específica e a torna transparente"""
         if not self.current_image_pil:
             return
         
-        # Salvar estado antes de modificar
         self.save_state()
         
         hex_color = self.line_hex_color.text().strip()
@@ -939,7 +1122,6 @@ class SliceWindow(QWidget):
         )
 
     def pick_color_from_image(self, event):
-        """Pega a cor do pixel clicado"""
         if not self.color_picker_mode or not self.current_image_pil:
             return
         
@@ -966,11 +1148,9 @@ class SliceWindow(QWidget):
         self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         self.view.mousePressEvent = self.view_mouse_press
                     
-
                 
                 
     def on_resize_width_change(self, value):
-        """Atualiza altura proporcionalmente se Keep Aspect Ratio está marcado"""
         if self.chk_keep_aspect.isChecked() and self.original_image_pil:
             w, h = self.original_image_pil.size
             aspect_ratio = h / w
@@ -980,7 +1160,6 @@ class SliceWindow(QWidget):
             self.spin_resize_height.blockSignals(False)
 
     def on_resize_height_change(self, value):
-        """Atualiza largura proporcionalmente se Keep Aspect Ratio está marcado"""
         if self.chk_keep_aspect.isChecked() and self.original_image_pil:
             w, h = self.original_image_pil.size
             aspect_ratio = w / h
@@ -994,7 +1173,6 @@ class SliceWindow(QWidget):
         if not self.original_image_pil:
             return
         
-        # Salvar estado antes de modificar
         self.save_state()
         
         new_width = self.spin_resize_width.value()
@@ -1026,11 +1204,9 @@ class SliceWindow(QWidget):
             QMessageBox.critical(self, "Resize Error", str(e))
 
     def reset_to_original(self):
-        """Restaura a imagem original sem resize"""
         if not self.original_image_pil:
             return
         
-        # Salvar estado antes de modificar
         self.save_state()
         
         self.current_image_pil = self.original_image_pil.copy()
@@ -1045,8 +1221,6 @@ class SliceWindow(QWidget):
         
         self.update_canvas_image()
                     
-
-
     def update_canvas_image(self):
         if self.current_image_pil:
             qim = self.pil_to_qimage(self.current_image_pil)
@@ -1061,7 +1235,6 @@ class SliceWindow(QWidget):
     def transform_image(self, mode):
         if not self.current_image_pil: return
         
-        # Salvar estado antes de transformar
         self.save_state()
         
         if mode == "rotate_90":
@@ -1090,7 +1263,6 @@ class SliceWindow(QWidget):
         self.view.resetTransform()
         self.view.scale(scale, scale)
         
-        # Atualizar zoom_factor do view
         self.view.zoom_factor = scale
 
     def cut_image(self):
@@ -1194,4 +1366,5 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = SliceWindow()
     window.show()
+    window.showMaximized()
     sys.exit(app.exec())
