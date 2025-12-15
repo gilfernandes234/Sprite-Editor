@@ -9,6 +9,8 @@
 - Flip
 - Selection tools
 - Outline/Adjust
+- Denoise
+- Upscale
 - Export
 
 
