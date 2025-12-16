@@ -454,6 +454,7 @@ class SliceWindow(QWidget):
         self.last_eraser_point = None
         
         self.cut_size_mode = False
+        self.rotate_fine_angle = 0        
         self.cut_rect_item = None
         self.is_drawing_cut_rect = False
         self.cut_start_pos = None        
@@ -1090,6 +1091,42 @@ class SliceWindow(QWidget):
 
         grp_selection.setLayout(selection_layout)
         tab_slice_layout.addWidget(grp_selection)
+        
+        
+        
+        # GRUPO: Rotate Fine (NOVO)
+        grp_rotate_fine = QGroupBox("Rotate Fine")
+        rotate_fine_layout = QGridLayout()
+
+        rotate_fine_layout.addWidget(QLabel("Angle:"), 0, 0)
+        self.slider_rotate_fine = QSlider(Qt.Orientation.Horizontal)
+        self.slider_rotate_fine.setRange(0, 360)
+        self.slider_rotate_fine.setValue(0)
+        self.slider_rotate_fine.valueChanged.connect(self.on_rotate_fine_change)
+        rotate_fine_layout.addWidget(self.slider_rotate_fine, 0, 1)
+
+        self.spin_rotate_fine = QSpinBox()
+        self.spin_rotate_fine.setRange(0, 360)
+        self.spin_rotate_fine.setValue(0)
+        self.spin_rotate_fine.setSuffix("°")
+        self.spin_rotate_fine.valueChanged.connect(self.on_rotate_fine_spin_change)
+        rotate_fine_layout.addWidget(self.spin_rotate_fine, 0, 2)
+
+        self.btn_apply_rotate_fine = QPushButton("Apply Rotate")
+        self.btn_apply_rotate_fine.setStyleSheet(
+            "background-color: #28a745; font-weight: bold; color: white;"
+        )
+        self.btn_apply_rotate_fine.clicked.connect(self.apply_rotate_fine)
+        self.btn_apply_rotate_fine.setEnabled(False)
+        rotate_fine_layout.addWidget(self.btn_apply_rotate_fine, 1, 0, 1, 3)
+
+        self.btn_reset_rotate_fine = QPushButton("Reset")
+        self.btn_reset_rotate_fine.clicked.connect(self.reset_rotate_fine)
+        rotate_fine_layout.addWidget(self.btn_reset_rotate_fine, 2, 0, 1, 3)
+
+        grp_rotate_fine.setLayout(rotate_fine_layout)
+        tab_slice_layout.addWidget(grp_rotate_fine)
+        
 
         tab_slice_layout.addStretch()
 
@@ -3321,7 +3358,12 @@ class SliceWindow(QWidget):
                 self.btn_apply_color.setEnabled(True)
                 self.btn_reset_color.setEnabled(True)
                 self.chk_enable_fine_grid.setEnabled(True)
-                self.btn_cut_size.setEnabled(True)                
+                self.btn_cut_size.setEnabled(True)
+            # Rotate Fine
+                self.btn_apply_rotate_fine.setEnabled(True)
+                self.slider_rotate_fine.setEnabled(True)
+                self.spin_rotate_fine.setEnabled(True)
+                
 
                 # Onde você habilita os outros botões:
                 if REMBG_AVAILABLE:  # ← Use a variável global
@@ -3393,7 +3435,12 @@ class SliceWindow(QWidget):
         self.btn_apply_color.setEnabled(True)
         self.btn_reset_color.setEnabled(True)
         self.chk_enable_fine_grid.setEnabled(True)
-        self.btn_cut_size.setEnabled(True)        
+        self.btn_cut_size.setEnabled(True)
+            # Rotate Fine
+        self.btn_apply_rotate_fine.setEnabled(True)
+        self.slider_rotate_fine.setEnabled(True)
+        self.spin_rotate_fine.setEnabled(True)
+        
 
         # IA bg remover depende de REMBG_AVAILABLE
         if REMBG_AVAILABLE:
@@ -3771,19 +3818,81 @@ class SliceWindow(QWidget):
                     # self.layer_widgets[main_layer.id].update_thumbnail()
 
     def transform_image(self, mode):
+        """
+        Transforma a imagem (rotate, flip)
+        Se um layer específico estiver selecionado, aplica APENAS nele
+        Se Main estiver selecionado, aplica na imagem toda
+        """
         if not self.current_image_pil:
             return
-
+        
+        # Obtém o layer ativo
+        active_layer = self.get_active_layer()
+        
+        # Define se vai aplicar no layer ou na imagem inteira
+        is_main_selected = not active_layer or active_layer.name == "Main"
+        
         self.save_state()
+        
+        if is_main_selected:
+            # Aplica na imagem toda (Main)
+            if mode == "rotate_90":
+                self.current_image_pil = self.current_image_pil.rotate(-90, expand=True)
+            elif mode == "flip_h":
+                self.current_image_pil = self.current_image_pil.transpose(Image.FLIP_LEFT_RIGHT)
+            elif mode == "flip_v":
+                self.current_image_pil = self.current_image_pil.transpose(Image.FLIP_TOP_BOTTOM)
+            
+            # Atualiza o layer main também
+            main_layer = self.get_main_layer()
+            if main_layer:
+                main_layer.image = self.current_image_pil.copy()
+            
+            self.update_canvas_image()
+            
+            # if mode == "rotate_90":
+                # QMessageBox.information(self, "Rotate", "Imagem rotacionada 90° no sentido anti-horário!")
+            # elif mode == "flip_h":
+                # QMessageBox.information(self, "Flip", "Imagem flipada horizontalmente!")
+            # elif mode == "flip_v":
+                # QMessageBox.information(self, "Flip", "Imagem flipada verticalmente!")
+        else:
+            # Aplica APENAS no layer selecionado
+            if active_layer and active_layer.image:
+                if mode == "rotate_90":
+                    active_layer.image = active_layer.image.rotate(-90, expand=True)
+                elif mode == "flip_h":
+                    active_layer.image = active_layer.image.transpose(Image.FLIP_LEFT_RIGHT)
+                elif mode == "flip_v":
+                    active_layer.image = active_layer.image.transpose(Image.FLIP_TOP_BOTTOM)
+                
+                # Atualiza o item gráfico do layer
+                if active_layer.id in self.layer_graphics_items:
+                    qim = self.pil_to_qimage(active_layer.image)
+                    pix = QPixmap.fromImage(qim)
+                    self.layer_graphics_items[active_layer.id].setPixmap(pix)
+                
+                self.compose_and_display_layers()
+                
+                # if mode == "rotate_90":
+                    # QMessageBox.information(
+                        # self,
+                        # "Layer Transform",
+                        # f"Layer '{active_layer.name}' rotacionado 90°!"
+                    # )
+                # elif mode == "flip_h":
+                    # QMessageBox.information(
+                        # self,
+                        # "Layer Transform",
+                        # f"Layer '{active_layer.name}' flipado horizontalmente!"
+                    # )
+                # elif mode == "flip_v":
+                    # QMessageBox.information(
+                        # self,
+                        # "Layer Transform",
+                        # f"Layer '{active_layer.name}' flipado verticalmente!"
+                    # )
 
-        if mode == "rotate_90":
-            self.current_image_pil = self.current_image_pil.rotate(-90, expand=True)
-        elif mode == "flip_h":
-            self.current_image_pil = self.current_image_pil.transpose(
-                Image.FLIP_LEFT_RIGHT
-            )
-
-        self.update_canvas_image()
 
     def on_grid_moved_by_mouse(self, x, y):
         self.spin_x.blockSignals(True)
@@ -3964,6 +4073,84 @@ class SliceWindow(QWidget):
             QMessageBox.critical(
                 self, "Export Error", f"Erro ao exportar imagem:\n{str(e)}"
             )
+
+
+    def on_rotate_fine_change(self, value):
+        """Sincroniza o spin box com o slider"""
+        self.spin_rotate_fine.blockSignals(True)
+        self.spin_rotate_fine.setValue(value)
+        self.spin_rotate_fine.blockSignals(False)
+
+    def on_rotate_fine_spin_change(self, value):
+        """Sincroniza o slider com o spin box"""
+        self.slider_rotate_fine.blockSignals(True)
+        self.slider_rotate_fine.setValue(value)
+        self.slider_rotate_fine.blockSignals(False)
+
+    def apply_rotate_fine(self):
+        """Aplica a rotação fina"""
+        if not self.current_image_pil:
+            return
+        
+        # Obtém o layer ativo
+        active_layer = self.get_active_layer()
+        is_main_selected = not active_layer or active_layer.name == "Main"
+        
+        self.save_state()
+        angle = self.spin_rotate_fine.value()
+        
+        try:
+            if is_main_selected:
+                # Rotaciona a imagem principal
+                self.current_image_pil = self.current_image_pil.rotate(-angle, expand=True)
+                
+                # Atualiza o layer main também
+                main_layer = self.get_main_layer()
+                if main_layer:
+                    main_layer.image = self.current_image_pil.copy()
+                
+                self.update_canvas_image()
+                
+                # QMessageBox.information(
+                    # self,
+                    # "Rotate Applied",
+                    # f"Imagem rotacionada em {angle}°"
+                # )
+            else:
+                # Rotaciona apenas o layer selecionado
+                if active_layer and active_layer.image:
+                    active_layer.image = active_layer.image.rotate(-angle, expand=True)
+                    
+                    # Atualiza o item gráfico do layer
+                    if active_layer.id in self.layer_graphics_items:
+                        qim = self.pil_to_qimage(active_layer.image)
+                        pix = QPixmap.fromImage(qim)
+                        self.layer_graphics_items[active_layer.id].setPixmap(pix)
+                    
+                    self.compose_and_display_layers()
+                    
+                    # QMessageBox.information(
+                        # self,
+                        # "Layer Rotate",
+                        # f"Layer '{active_layer.name}' rotacionado em {angle}°"
+                    # )
+            
+            self.reset_rotate_fine()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Erro ao rotacionar: {str(e)}")
+
+    def reset_rotate_fine(self):
+        """Reseta os controles de rotação fina"""
+        self.slider_rotate_fine.blockSignals(True)
+        self.spin_rotate_fine.blockSignals(True)
+        
+        self.slider_rotate_fine.setValue(0)
+        self.spin_rotate_fine.setValue(0)
+        
+        self.slider_rotate_fine.blockSignals(False)
+        self.spin_rotate_fine.blockSignals(False)
+
 
 
 if __name__ == "__main__":
