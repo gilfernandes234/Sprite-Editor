@@ -1,7 +1,3 @@
-
-
-
-
 import io
 import re
 import sys
@@ -56,7 +52,7 @@ from PyQt6.QtWidgets import (
 
 
 class Layer:
-    """Representa uma camada de imagem"""
+
 
     def __init__(self, name="Layer", image=None, x=0, y=0):
         self.id = str(uuid.uuid4())
@@ -116,14 +112,14 @@ class LayerWidget(QFrame):
         layout.addWidget(self.chk_visible)
 
         # Thumbnail
-        self.lbl_thumbnail = QLabel()
-        self.lbl_thumbnail.setFixedSize(40, 40)
-        self.lbl_thumbnail.setStyleSheet(
-            "background-color: #222; border: 1px solid #444;"
-        )
-        self.lbl_thumbnail.setScaledContents(True)
-        self.update_thumbnail()
-        layout.addWidget(self.lbl_thumbnail)
+        # self.lbl_thumbnail = QLabel()
+        # self.lbl_thumbnail.setFixedSize(40, 40)
+        # self.lbl_thumbnail.setStyleSheet(
+            # "background-color: #222; border: 1px solid #444;"
+        # )
+        # self.lbl_thumbnail.setScaledContents(True)
+        # self.update_thumbnail()
+        # layout.addWidget(self.lbl_thumbnail)
 
         # Nome do layer
         name_text = f"🔒 {layer.name}" if is_main else layer.name
@@ -137,24 +133,24 @@ class LayerWidget(QFrame):
             lbl_main.setStyleSheet("color: #ffa500; font-size: 9px; font-weight: bold;")
             layout.addWidget(lbl_main)
 
-    def update_thumbnail(self):
-        """Atualiza a thumbnail do layer"""
-        if self.layer.image:
-            # Redimensiona para thumbnail
-            thumb = self.layer.image.copy()
-            thumb.thumbnail((40, 40), Image.NEAREST)
+    # def update_thumbnail(self):
+    
+        # if self.layer.image:
+     
+            # thumb = self.layer.image.copy()
+            # thumb.thumbnail((40, 40), Image.NEAREST)
 
-            # Converte para QPixmap
-            if thumb.mode != "RGBA":
-                thumb = thumb.convert("RGBA")
-            data = thumb.tobytes("raw", "RGBA")
-            qimage = QImage(
-                data, thumb.width, thumb.height, QImage.Format.Format_RGBA8888
-            )
-            pixmap = QPixmap.fromImage(qimage)
-            self.lbl_thumbnail.setPixmap(pixmap)
-        else:
-            self.lbl_thumbnail.clear()
+ 
+            # if thumb.mode != "RGBA":
+                # thumb = thumb.convert("RGBA")
+            # data = thumb.tobytes("raw", "RGBA")
+            # qimage = QImage(
+                # data, thumb.width, thumb.height, QImage.Format.Format_RGBA8888
+            # )
+            # pixmap = QPixmap.fromImage(qimage)
+            # self.lbl_thumbnail.setPixmap(pixmap)
+        # else:
+            # self.lbl_thumbnail.clear()
 
     def set_selected(self, selected):
         """Define se este layer está selecionado"""
@@ -1392,12 +1388,12 @@ class SliceWindow(QWidget):
             self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
             self.grid_item.setFlag(QGraphicsObject.GraphicsItemFlag.ItemIsMovable, False)
             
-            QMessageBox.information(
-                self,
-                "Cut Size Mode",
-                "Clique e arraste para criar um retângulo de recorte.\n"
-                "O projeto será cortado para o tamanho selecionado."
-            )
+            # QMessageBox.information(
+                # self,
+                # "Cut Size Mode",
+                # "Clique e arraste para criar um retângulo de recorte.\n"
+                # "O projeto será cortado para o tamanho selecionado."
+            # )
         else:
             self.btn_cut_size.setText("Cut Size")
             self.btn_cut_size.setStyleSheet(
@@ -1494,8 +1490,8 @@ class SliceWindow(QWidget):
             main_layer = self.get_main_layer()
             if main_layer:
                 main_layer.image = new_image.copy()
-                if main_layer.id in self.layer_widgets:
-                    self.layer_widgets[main_layer.id].update_thumbnail()
+                # if main_layer.id in self.layer_widgets:
+                    # self.layer_widgets[main_layer.id].update_thumbnail()
             
             # Atualiza UI
             self.update_canvas_image()
@@ -1792,12 +1788,12 @@ class SliceWindow(QWidget):
             self.update_layers_ui()
             self.compose_and_display_layers()
 
-            QMessageBox.information(
-                self,
-                "Layer Adicionado",
-                f"Layer '{new_layer.name}' adicionado!\n"
-                f"Arraste-o no canvas para posicioná-lo.",
-            )
+            # QMessageBox.information(
+                # self,
+                # "Layer Adicionado",
+                # f"Layer '{new_layer.name}' adicionado!\n"
+                # f"Arraste-o no canvas para posicioná-lo.",
+            # )
 
         except Exception as e:
             QMessageBox.critical(self, "Erro", f"Erro ao carregar imagem: {str(e)}")
@@ -2089,7 +2085,7 @@ class SliceWindow(QWidget):
         # Atualiza o thumbnail do layer main
         if main_layer.id in self.layer_widgets:
             self.layer_widgets[main_layer.id].layer.image = result.copy()
-            self.layer_widgets[main_layer.id].update_thumbnail()
+            # self.layer_widgets[main_layer.id].update_thumbnail()
 
         QMessageBox.information(
             self, "Merge Complete", "Todos os layers foram mesclados com sucesso!"
@@ -2195,7 +2191,6 @@ class SliceWindow(QWidget):
             QMessageBox.information(
                 self,
                 "Background Removed",
-                "Background removido automaticamente com sucesso usando IA!",
             )
 
         except Exception as e:
@@ -2591,11 +2586,11 @@ class SliceWindow(QWidget):
                 f"background-color: {hex_color}; border: 1px solid #222;"
             )
 
-            QMessageBox.information(
-                self,
-                "Color Selected",
-                f"Cor do pincel: {hex_color}\nRGBA: ({r}, {g}, {b}, {a})",
-            )
+            # QMessageBox.information(
+                # self,
+                # "Color Selected",
+                # f"Cor do pincel: {hex_color}\nRGBA: ({r}, {g}, {b}, {a})",
+            # )
 
         self.paint_color_picker_mode = False
         self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -3772,8 +3767,8 @@ class SliceWindow(QWidget):
             main_layer = self.get_main_layer()
             if main_layer:
                 main_layer.image = self.current_image_pil.copy()
-                if main_layer.id in self.layer_widgets:
-                    self.layer_widgets[main_layer.id].update_thumbnail()
+                # if main_layer.id in self.layer_widgets:
+                    # self.layer_widgets[main_layer.id].update_thumbnail()
 
     def transform_image(self, mode):
         if not self.current_image_pil:
